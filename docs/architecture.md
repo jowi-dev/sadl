@@ -1,7 +1,6 @@
 # sadl architecture (draft)
 
-Status: **draft for discussion**. Nothing here is decided until it moves into
-an ADR under `docs/decisions/`.
+Status: **draft**. Settled decisions live in `docs/decisions/`.
 
 ## Goal
 
@@ -28,8 +27,8 @@ in one long-lived server.
         │       ├─ conversation state + turn loop      │
         │       ├─ ToolRunner (Task.Supervisor)        │
         │       └─ PubSub topic "session:<id>"         │
-        │  Provider (behaviour: Anthropic, OpenAI-compat)│
-        │  Store (SQLite / JSONL transcripts)          │
+        │  Provider (behaviour; OpenAI-compat first)   │
+        │  Store (SQLite)                              │
         └─────────────────────────────────────────────┘
 ```
 
@@ -57,8 +56,9 @@ in one long-lived server.
   safe and keeps the client thin. Shell execution uses `erlexec` or
   `MuonTrap` rather than raw `Port`s (process-group kill, no orphaned
   children on timeout).
-- Provider behaviour with streaming (Req/Finch + SSE). Start with Anthropic
-  Messages API; an OpenAI-compatible adapter covers OpenRouter/Venice/Ollama.
+- Provider behaviour with streaming (Req/Finch + SSE). Start with an
+  OpenAI-compatible adapter pointed at Venice.ai; it also covers
+  OpenRouter/Ollama. Anthropic's Messages API is a later adapter.
 - Every turn is persisted before it is acknowledged, so a server restart
   loses at most the in-flight request.
 
@@ -72,7 +72,17 @@ in one long-lived server.
   halves. It gets **golden-file fixtures** checked into the repo and tested
   from both sides so the Rust and Elixir types cannot drift.
 
-## Integration with tm
+## MVP scope (pi.dev-shaped, not Claude Code-shaped)
+
+- Four tools: `read`, `write`, `edit`, `bash`. No permission prompts (YOLO,
+  like pi); permissions come later.
+- One provider: Venice.ai through an OpenAI-compatible adapter (default
+  model GLM 5.3 Flash, configurable). The provider is a behaviour so
+  Anthropic and others can be added later.
+- SQLite-backed sessions with resume.
+- Driven by hand first. `tm` integration comes after the tool proves itself.
+
+## Integration with tm (later)
 
 `sadl` becomes a third `AgentKind` in tskmstr (after `Claude` and
 `Opencode`), so it has to supply what `AgentRunner` asks for:
@@ -82,22 +92,9 @@ optionally telemetry. Telemetry should be **a server subscription, not hook
 scripts**: `tm` can read run events from the server directly instead of
 deploying bash hooks into every worktree.
 
-## Risks / open questions
+## Open questions
 
-1. **Single point of failure.** One server going down takes every session
-   with it. Mitigations: persistence per turn, client reconnect with
-   backoff, server run under systemd user unit or auto-started by the client.
-2. **Auth and billing.** Claude subscription OAuth in a third-party client
-   is not a supported path; sadl should assume API-key billing. At "many
-   sessions in parallel", that cost has to be compared against what
-   subscription-backed Claude Code costs today.
-3. **Parity scope.** Claude Code's value is mostly its tool set, prompts,
-   permissions, compaction, skills and subagents, not its UI. An MVP needs
-   at least: read/write/edit/glob/grep/bash tools, permission prompts,
-   context compaction, resume.
-4. **Two languages, one protocol.** Real overhead vs an all-Rust server.
-   The case for Elixir is supervision, per-session processes, PubSub
-   (attach and observe sessions), and hot upgrades without killing sessions.
-5. **Where memory actually goes.** Need a baseline measurement (RSS of an
-   idle and a busy Claude Code session) and a budget per sadl client so the
-   project can tell whether it is hitting its goal.
+1. **Server lifecycle:** auto-started by the client, a systemd user unit, or
+   both. MVP default: client auto-start (zero config).
+2. **Compaction strategy** once conversations outgrow the model's context.
+3. **Server naming:** `sadld` for now; `stable` is on the table.

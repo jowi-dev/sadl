@@ -1,0 +1,7 @@
+/.direnv/
+/.nix-mix/
+/.nix-hex/
+/client/target/
+/server/_build/
+/server/deps/
+/server/*.ez

@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "method": "turn.end", "params": {"session_id": "s_01", "turn_id": "t_01", "stop_reason": "completed", "usage": {"input_tokens": 1834, "output_tokens": 112}}}

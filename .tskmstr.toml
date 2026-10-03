@@ -1,0 +1,18 @@
+status_on_pr = "In Review"
+schema_version = 2
+
+[backend]
+provider = "github"
+
+[backend.github]
+repo = "jowi-dev/sadl"
+
+[work.lanes.sadl]
+repo = "."
+base_branch = "main"
+prompt_file = ".tskmstr/prompts/sadl-lane.md"
+model = "opus"
+
+[work.create]
+dir = "."
+prompt_file = ".tskmstr/prompts/create.md"

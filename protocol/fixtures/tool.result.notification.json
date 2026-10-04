@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "method": "tool.result", "params": {"session_id": "s_01", "turn_id": "t_01", "call_id": "c_01", "output": "README.md\nsrc\n", "is_error": false}}

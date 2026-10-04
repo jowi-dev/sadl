@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "method": "error", "params": {"session_id": "s_01", "code": -32010, "message": "provider returned HTTP 503"}}

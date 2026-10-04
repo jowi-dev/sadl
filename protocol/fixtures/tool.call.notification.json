@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "method": "tool.call", "params": {"session_id": "s_01", "turn_id": "t_01", "call_id": "c_01", "name": "bash", "args": {"command": "ls", "timeout_ms": 10000}}}

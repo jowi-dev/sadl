@@ -26,6 +26,8 @@ defmodule Sadld.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:req, "~> 0.5"},
+      {:plug, "~> 1.16", only: :test},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:erlexec, "~> 2.2"}
     ]

@@ -19,10 +19,14 @@ defmodule Sadld.Test.StubProvider do
         respond.(messages, on_text)
 
       respond ->
-        with {:ok, %{text: text}} = reply <- respond.(messages) do
-          if text != "", do: on_text.(text)
-          reply
-        end
+        messages |> respond.() |> stream_text(on_text)
     end
   end
+
+  defp stream_text({:ok, %{text: text}} = reply, on_text) do
+    if text != "", do: on_text.(text)
+    reply
+  end
+
+  defp stream_text(error, _on_text), do: error
 end

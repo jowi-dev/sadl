@@ -7,8 +7,12 @@ defmodule Sadld.Listener do
   that owns the listening socket. On boot the acceptor creates the socket's
   parent directory, replaces a stale socket file left by a server that is
   no longer running, and refuses to start (`:eaddrinuse`) if another server
-  still answers on the path. The socket is made readable and writable by
-  its owner only, and is removed when the listener stops.
+  still answers on the path, or (`{:path_too_long, path}`) if the path does
+  not fit in a Unix socket address. The socket is made readable and
+  writable by its owner only, and is removed when the listener stops.
+
+  The application starts a listener on `default_path/0` unless the `:sadld`
+  `:listen` environment is `false`, as it is in tests.
 
   ## Options
 

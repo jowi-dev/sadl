@@ -73,6 +73,30 @@ defmodule Sadld.SessionTest do
            ]
   end
 
+  test "text the provider streams reaches the listener chunk by chunk" do
+    respond = fn _messages, on_text ->
+      on_text.("hel")
+      on_text.("lo")
+      reply("hello")
+    end
+
+    id = start_session(respond)
+
+    {:ok, turn_id} = Session.send_message(id, "hi")
+
+    assert [
+             %Notification{method: "turn.delta", params: %{text: "hel"}},
+             %Notification{method: "turn.delta", params: %{text: "lo"}},
+             %Notification{method: "turn.end"}
+           ] = collect_turn(turn_id)
+
+    assert List.last(Session.messages(id)) == %{
+             role: :assistant,
+             content: "hello",
+             tool_calls: []
+           }
+  end
+
   test "tool calls run and their results feed back until the model stops" do
     call = %{id: "call_1", name: "read", args: %{"path" => "a.txt"}}
 

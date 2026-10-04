@@ -1,9 +1,13 @@
 defmodule Sadld.Provider do
   @moduledoc """
   An LLM backend. A `Sadld.Session` calls `c:chat/2` once per model step of
-  a turn, with the conversation so far, and acts on the reply: it emits the
-  text and runs any tool calls, then calls again with their results until a
-  reply has no tool calls.
+  a turn, with the conversation so far, and acts on the reply: it runs any
+  tool calls, then calls again with their results until a reply has no
+  tool calls.
+
+  Reply text streams: the provider passes each chunk to the `:on_text`
+  callback as it arrives, and the session forwards it as a `turn.delta`.
+  The chunks concatenate to the reply's `text`.
   """
 
   @typedoc "A tool call the model asks for. `args` is the decoded argument object."
@@ -24,7 +28,11 @@ defmodule Sadld.Provider do
 
   @doc """
   Asks the model for its next reply to `messages`. `opts` are the options
-  given alongside the module in the session's `:provider`.
+  given alongside the module in the session's `:provider`, plus:
+
+    * `:model` - the session's model name
+    * `:on_text` - a `(String.t() -> any())` callback for each chunk of
+      reply text, called in order before `c:chat/2` returns
   """
   @callback chat(messages :: [message()], opts :: keyword()) ::
               {:ok, response()} | {:error, term()}

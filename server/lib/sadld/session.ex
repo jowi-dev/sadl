@@ -5,7 +5,7 @@ defmodule Sadld.Session do
   minted at `start/1`, so a crash in one session leaves the others alone.
 
   The session owns the message list and runs turns. A turn sends the
-  conversation to the provider, emits the reply text, runs any tool calls
+  conversation to the provider, streams the reply text, runs any tool calls
   and feeds their results back, repeating until a reply has no tool calls.
   The loop runs in a task under `Sadld.TurnSupervisor` so the session keeps
   answering calls, and `cancel/1` can kill it mid-turn.
@@ -214,10 +214,10 @@ defmodule Sadld.Session do
   # The turn loop, run inside the turn task. `report` sends an event to the
   # session. Returns `:completed` or `{:error, reason}`.
   defp run_turn(messages, {provider, provider_opts} = p, tools, cwd, report) do
-    case provider.chat(messages, provider_opts) do
-      {:ok, %{text: text, tool_calls: tool_calls, usage: usage}} ->
-        if text != "", do: report.({:notify, "turn.delta", %{text: text}})
+    on_text = &report.({:notify, "turn.delta", %{text: &1}})
 
+    case provider.chat(messages, Keyword.put(provider_opts, :on_text, on_text)) do
+      {:ok, %{text: text, tool_calls: tool_calls, usage: usage}} ->
         results = Enum.map(tool_calls, &run_tool(&1, tools, cwd, report))
         step = [%{role: :assistant, content: text, tool_calls: tool_calls} | results]
         report.({:step, step, usage})

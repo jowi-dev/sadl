@@ -77,8 +77,10 @@ in one long-lived server.
 - Four tools: `read`, `write`, `edit`, `bash`. No permission prompts (YOLO,
   like pi); permissions come later.
 - One provider: Venice.ai through an OpenAI-compatible adapter (default
-  model GLM 5.3 Flash, configurable). The provider is a behaviour so
-  Anthropic and others can be added later.
+  model GLM 5.3 Flash, `z-ai-glm-5-3-flash`, configurable). The API key
+  comes from `VENICE_API_KEY` or `$XDG_CONFIG_HOME/sadl/api_key`, never
+  from committed config. The provider is a behaviour so Anthropic and
+  others can be added later.
 - SQLite-backed sessions with resume.
 - Driven by hand first. `tm` integration comes after the tool proves itself.
 

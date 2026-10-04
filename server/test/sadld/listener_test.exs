@@ -189,4 +189,11 @@ defmodule Sadld.ListenerTest do
 
     refute File.exists?(path)
   end
+
+  test "refuses a path too long for a Unix socket", %{path: path} do
+    long = Path.join(Path.dirname(path), String.duplicate("x", 120) <> ".sock")
+
+    assert {:error, reason} = start_listener(long)
+    assert inspect(reason) =~ "path_too_long"
+  end
 end

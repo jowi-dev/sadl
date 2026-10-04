@@ -8,6 +8,9 @@ defmodule Sadld.Listener.Acceptor do
 
   @default_max_line_length 1_048_576
 
+  # sun_path holds 108 bytes on Linux, including the terminating NUL.
+  @max_path_bytes 107
+
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @impl true
@@ -16,7 +19,8 @@ defmodule Sadld.Listener.Acceptor do
     connections = Keyword.fetch!(opts, :connections)
     max_line_length = Keyword.get(opts, :max_line_length, @default_max_line_length)
 
-    with :ok <- File.mkdir_p(Path.dirname(path)),
+    with :ok <- check_length(path),
+         :ok <- File.mkdir_p(Path.dirname(path)),
          :ok <- remove_stale(path),
          {:ok, socket} <- listen(path, max_line_length) do
       Process.flag(:trap_exit, true)
@@ -34,6 +38,10 @@ defmodule Sadld.Listener.Acceptor do
   def terminate(_reason, %{socket: socket, path: path}) do
     :gen_tcp.close(socket)
     File.rm(path)
+  end
+
+  defp check_length(path) do
+    if byte_size(path) <= @max_path_bytes, do: :ok, else: {:error, {:path_too_long, path}}
   end
 
   defp remove_stale(path) do

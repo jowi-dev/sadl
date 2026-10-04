@@ -1,0 +1,243 @@
+defmodule Sadld.SessionTest do
+  use ExUnit.Case, async: true
+
+  alias Sadld.Protocol.Notification
+  alias Sadld.Session
+  alias Sadld.Test.{StubProvider, StubTools}
+
+  @usage %{input_tokens: 3, output_tokens: 2}
+
+  defp reply(text), do: {:ok, %{text: text, tool_calls: [], usage: @usage}}
+
+  defp start_session(respond, opts \\ []) do
+    run = Keyword.get(opts, :run, fn _call, _cwd -> {:ok, "ok"} end)
+
+    {:ok, id} =
+      Session.start(
+        cwd: "/tmp/project",
+        model: "stub-model",
+        provider: {StubProvider, respond: respond},
+        tools: {StubTools, run: run},
+        listener: self()
+      )
+
+    id
+  end
+
+  # Collects notifications for `turn_id` up to and including its turn.end.
+  defp collect_turn(turn_id, acc \\ []) do
+    receive do
+      {:session_event, _id, %Notification{params: %{turn_id: ^turn_id}} = n} ->
+        if n.method == "turn.end",
+          do: Enum.reverse([n | acc]),
+          else: collect_turn(turn_id, [n | acc])
+
+      {:session_event, _id, %Notification{method: "error"} = n} ->
+        collect_turn(turn_id, [n | acc])
+    after
+      1_000 -> flunk("turn #{turn_id} did not end; got #{inspect(Enum.reverse(acc))}")
+    end
+  end
+
+  test "start registers the session under a fresh id" do
+    id = start_session(fn _ -> reply("hi") end)
+    other = start_session(fn _ -> reply("hi") end)
+
+    assert id != other
+    assert is_pid(Session.whereis(id))
+    assert Session.whereis("missing") == nil
+  end
+
+  test "a turn without tool calls streams the reply and completes" do
+    id = start_session(fn _ -> reply("hello") end)
+
+    assert {:ok, turn_id} = Session.send_message(id, "hi")
+
+    assert [
+             %Notification{method: "turn.delta", params: delta},
+             %Notification{method: "turn.end", params: turn_end}
+           ] = collect_turn(turn_id)
+
+    assert delta == %{session_id: id, turn_id: turn_id, text: "hello"}
+
+    assert turn_end == %{
+             session_id: id,
+             turn_id: turn_id,
+             stop_reason: "completed",
+             usage: @usage
+           }
+
+    assert Session.messages(id) == [
+             %{role: :user, content: "hi"},
+             %{role: :assistant, content: "hello", tool_calls: []}
+           ]
+  end
+
+  test "tool calls run and their results feed back until the model stops" do
+    call = %{id: "call_1", name: "read", args: %{"path" => "a.txt"}}
+
+    respond = fn messages ->
+      case List.last(messages) do
+        %{role: :user} -> {:ok, %{text: "", tool_calls: [call], usage: @usage}}
+        %{role: :tool, content: "contents"} -> reply("done")
+      end
+    end
+
+    run = fn %{name: "read"}, "/tmp/project" -> {:ok, "contents"} end
+    id = start_session(respond, run: run)
+
+    {:ok, turn_id} = Session.send_message(id, "read a.txt")
+
+    assert [
+             %Notification{method: "tool.call", params: tool_call},
+             %Notification{method: "tool.result", params: tool_result},
+             %Notification{method: "turn.delta", params: %{text: "done"}},
+             %Notification{method: "turn.end", params: turn_end}
+           ] = collect_turn(turn_id)
+
+    assert tool_call == %{
+             session_id: id,
+             turn_id: turn_id,
+             call_id: "call_1",
+             name: "read",
+             args: %{"path" => "a.txt"}
+           }
+
+    assert tool_result == %{
+             session_id: id,
+             turn_id: turn_id,
+             call_id: "call_1",
+             output: "contents",
+             is_error: false
+           }
+
+    assert turn_end.stop_reason == "completed"
+    assert turn_end.usage == %{input_tokens: 6, output_tokens: 4}
+
+    assert Session.messages(id) == [
+             %{role: :user, content: "read a.txt"},
+             %{role: :assistant, content: "", tool_calls: [call]},
+             %{role: :tool, call_id: "call_1", content: "contents", is_error: false},
+             %{role: :assistant, content: "done", tool_calls: []}
+           ]
+  end
+
+  test "a failing tool reports is_error and the turn continues" do
+    call = %{id: "call_1", name: "bash", args: %{}}
+
+    respond = fn messages ->
+      case List.last(messages) do
+        %{role: :user} -> {:ok, %{text: "", tool_calls: [call], usage: @usage}}
+        %{role: :tool, is_error: true} -> reply("it failed")
+      end
+    end
+
+    id = start_session(respond, run: fn _, _ -> {:error, "boom"} end)
+    {:ok, turn_id} = Session.send_message(id, "go")
+
+    notifications = collect_turn(turn_id)
+
+    assert %Notification{params: %{output: "boom", is_error: true}} =
+             Enum.find(notifications, &(&1.method == "tool.result"))
+
+    assert List.last(notifications).params.stop_reason == "completed"
+  end
+
+  test "a provider error sends error then ends the turn with stop_reason error" do
+    id = start_session(fn _ -> {:error, :timeout} end)
+    {:ok, turn_id} = Session.send_message(id, "hi")
+
+    assert [
+             %Notification{method: "error", params: %{session_id: ^id, code: -32_603}},
+             %Notification{method: "turn.end", params: turn_end}
+           ] = collect_turn(turn_id)
+
+    assert turn_end.stop_reason == "error"
+    assert turn_end.usage == %{input_tokens: 0, output_tokens: 0}
+  end
+
+  @tag :capture_log
+  test "a crashing turn ends with stop_reason error and leaves the session usable" do
+    respond = fn messages ->
+      if length(messages) == 1, do: raise("provider bug"), else: reply("recovered")
+    end
+
+    id = start_session(respond)
+    pid = Session.whereis(id)
+
+    {:ok, turn_id} = Session.send_message(id, "first")
+    assert List.last(collect_turn(turn_id)).params.stop_reason == "error"
+
+    {:ok, turn_id} = Session.send_message(id, "second")
+    assert List.last(collect_turn(turn_id)).params.stop_reason == "completed"
+    assert Session.whereis(id) == pid
+  end
+
+  describe "while a turn is running" do
+    setup do
+      test_pid = self()
+
+      respond = fn _messages ->
+        send(test_pid, {:provider_called, self()})
+
+        receive do
+          :release -> reply("late")
+        end
+      end
+
+      id = start_session(respond)
+      {:ok, turn_id} = Session.send_message(id, "hi")
+      assert_receive {:provider_called, provider_pid}
+
+      %{id: id, turn_id: turn_id, provider_pid: provider_pid}
+    end
+
+    test "send_message reports the session busy", %{id: id} do
+      assert Session.send_message(id, "again") == {:error, :busy}
+    end
+
+    test "cancel stops the turn and frees the session", ctx do
+      ref = Process.monitor(ctx.provider_pid)
+
+      assert Session.cancel(ctx.id) == :ok
+
+      assert [%Notification{method: "turn.end", params: turn_end}] = collect_turn(ctx.turn_id)
+      assert turn_end.stop_reason == "cancelled"
+      assert_receive {:DOWN, ^ref, :process, _, _}
+
+      assert Session.messages(ctx.id) == [%{role: :user, content: "hi"}]
+      assert {:ok, _turn_id} = Session.send_message(ctx.id, "again")
+    end
+  end
+
+  test "cancel with no running turn does nothing" do
+    id = start_session(fn _ -> reply("hi") end)
+
+    assert Session.cancel(id) == :ok
+    refute_receive {:session_event, ^id, _}
+  end
+
+  test "calls on an unknown session return :not_found" do
+    assert Session.send_message("missing", "hi") == {:error, :not_found}
+    assert Session.cancel("missing") == {:error, :not_found}
+    assert Session.messages("missing") == {:error, :not_found}
+  end
+
+  test "killing one session leaves its siblings working" do
+    victim = start_session(fn _ -> reply("never") end)
+    sibling = start_session(fn _ -> reply("still here") end)
+
+    victim_pid = Session.whereis(victim)
+    sibling_pid = Session.whereis(sibling)
+    ref = Process.monitor(victim_pid)
+
+    Process.exit(victim_pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^victim_pid, :killed}
+
+    assert Session.whereis(sibling) == sibling_pid
+    {:ok, turn_id} = Session.send_message(sibling, "you ok?")
+
+    assert [_delta, %Notification{method: "turn.end", params: %{stop_reason: "completed"}}] =
+             collect_turn(turn_id)
+  end
+end

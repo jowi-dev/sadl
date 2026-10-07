@@ -28,6 +28,7 @@ With `sadld` running, `sadl` opens a new session in the current directory.
 | PageUp, PageDown                 | Scroll the transcript                   |
 | Ctrl+C                           | Clear the prompt, or quit when empty    |
 
-The status line shows the model, the session id, the session's token totals
-and whether a turn is running. The client keeps about 8 MB of transcript text
-and drops the oldest blocks beyond that; the full history stays on the server.
+The status line shows the model, the session id, token totals for the turns
+this window has seen, and whether a turn is running. The client keeps about
+8 MB of transcript text and drops the oldest blocks beyond that; the full
+history stays on the server.

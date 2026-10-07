@@ -5,8 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use sadl::protocol::{
-    HandshakeResult, Notification, Request, Response, SessionCancelResult, SessionInfo,
-    SessionListResult, SessionSendResult,
+    HandshakeResult, Notification, Outcome, Request, Response, ServerMessage, SessionCancelResult,
+    SessionInfo, SessionListResult, SessionSendResult,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -63,6 +63,66 @@ fn every_fixture_roundtrips_losslessly() {
         count += 1;
     }
     assert!(count > 0, "no fixtures found");
+}
+
+/// Every server → client fixture must decode from its wire line without the
+/// reader knowing its kind up front, as the client socket reads them.
+#[test]
+fn every_server_fixture_roundtrips_as_a_server_message() {
+    let mut count = 0;
+    for entry in fs::read_dir(fixtures_dir()).expect("fixtures dir") {
+        let path = entry.expect("dir entry").path();
+        let name = path.file_name().unwrap().to_str().unwrap().to_string();
+        let (_, kind) = parse_name(&name);
+        let expect_response = match kind.as_str() {
+            "response" => true,
+            "notification" => false,
+            _ => continue,
+        };
+        let line = fs::read_to_string(&path).expect("read");
+        let original: Value = serde_json::from_str(&line).expect("valid json");
+
+        let decoded = ServerMessage::decode(line.trim_end()).expect("decode");
+
+        assert_eq!(
+            matches!(decoded, ServerMessage::Response(_)),
+            expect_response,
+            "{name} decoded as the wrong kind"
+        );
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("encode"),
+            original,
+            "{name} did not roundtrip"
+        );
+        count += 1;
+    }
+    assert!(count > 0, "no server fixtures found");
+}
+
+#[test]
+fn a_raw_response_converts_to_its_typed_result() {
+    let line = fs::read_to_string(fixtures_dir().join("session.send.response.json")).unwrap();
+    let ServerMessage::Response(raw) = ServerMessage::decode(&line).unwrap() else {
+        panic!("not a response");
+    };
+
+    let typed: Response<SessionSendResult> = raw.into_typed().expect("typed");
+
+    assert_eq!(
+        typed.outcome,
+        Outcome::Result(SessionSendResult {
+            turn_id: "t_01".into()
+        })
+    );
+}
+
+#[test]
+fn a_server_message_must_be_a_valid_response_or_notification() {
+    assert!(ServerMessage::decode("not json").is_err());
+    assert!(
+        ServerMessage::decode(r#"{"jsonrpc": "2.0", "method": "nope", "params": {}}"#).is_err()
+    );
+    assert!(ServerMessage::decode(r#"{"jsonrpc": "2.0", "id": 1}"#).is_err());
 }
 
 #[test]

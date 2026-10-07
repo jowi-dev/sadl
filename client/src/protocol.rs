@@ -4,6 +4,7 @@
 //! notifications are tagged by `method`; a response carries no method, so its
 //! result type is chosen by the caller from the request it answers.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -208,4 +209,43 @@ pub struct SessionError {
     pub session_id: String,
     pub code: i64,
     pub message: String,
+}
+
+impl Response<Value> {
+    /// Decodes the raw `result` as `T`, the result type of the method this
+    /// response answers. An `error` outcome converts unchanged.
+    pub fn into_typed<T: DeserializeOwned>(self) -> serde_json::Result<Response<T>> {
+        let outcome = match self.outcome {
+            Outcome::Result(value) => Outcome::Result(serde_json::from_value(value)?),
+            Outcome::Error(error) => Outcome::Error(error),
+        };
+        Ok(Response {
+            jsonrpc: self.jsonrpc,
+            id: self.id,
+            outcome,
+        })
+    }
+}
+
+/// Any server → client message, as read off the socket. A response's result
+/// stays raw until the caller, who knows which request it answers, calls
+/// [`Response::into_typed`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ServerMessage {
+    Response(Response<Value>),
+    Notification(Notification),
+}
+
+impl ServerMessage {
+    /// Decodes one line. A message with a `method` is a notification;
+    /// anything else must be a response.
+    pub fn decode(line: &str) -> serde_json::Result<Self> {
+        let value: Value = serde_json::from_str(line)?;
+        if value.get("method").is_some() {
+            serde_json::from_value(value).map(Self::Notification)
+        } else {
+            serde_json::from_value(value).map(Self::Response)
+        }
+    }
 }

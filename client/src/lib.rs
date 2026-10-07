@@ -3,3 +3,4 @@
 pub mod connection;
 pub mod link;
 pub mod protocol;
+pub mod tui;

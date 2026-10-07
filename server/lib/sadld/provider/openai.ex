@@ -53,15 +53,7 @@ defmodule Sadld.Provider.OpenAI do
 
   @doc "The key file read by default: `$XDG_CONFIG_HOME/sadl/api_key`."
   @spec default_api_key_file() :: Path.t()
-  def default_api_key_file do
-    config_home =
-      case System.get_env("XDG_CONFIG_HOME") do
-        home when home in [nil, ""] -> Path.join(System.user_home!(), ".config")
-        home -> home
-      end
-
-    Path.join([config_home, "sadl", "api_key"])
-  end
+  def default_api_key_file, do: Path.join(Sadld.config_dir(), "api_key")
 
   @impl true
   def chat(messages, opts) do

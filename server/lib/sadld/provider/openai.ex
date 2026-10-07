@@ -16,6 +16,8 @@ defmodule Sadld.Provider.OpenAI do
     * `:base_url` - API root (default `"https://api.venice.ai/api/v1"`)
     * `:model` - model name (default `default_model/0`); the session
       passes its own
+    * `:system` - system prompt, sent as the first message; the session
+      passes its own
     * `:api_key` - API key; normally left unset in favour of the
       `VENICE_API_KEY` environment variable or `:api_key_file`
     * `:api_key_file` - file holding the API key, read when
@@ -112,7 +114,7 @@ defmodule Sadld.Provider.OpenAI do
   defp request_body(messages, opts) do
     body = %{
       model: Keyword.get(opts, :model, @default_model),
-      messages: Enum.map(messages, &encode_message/1),
+      messages: system_message(opts) ++ Enum.map(messages, &encode_message/1),
       stream: true,
       stream_options: %{include_usage: true}
     }
@@ -120,6 +122,13 @@ defmodule Sadld.Provider.OpenAI do
     case Keyword.get(opts, :tools, []) do
       [] -> body
       tools -> Map.put(body, :tools, Enum.map(tools, &encode_tool/1))
+    end
+  end
+
+  defp system_message(opts) do
+    case Keyword.get(opts, :system) do
+      nil -> []
+      system -> [%{role: "system", content: system}]
     end
   end
 

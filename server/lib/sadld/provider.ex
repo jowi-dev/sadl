@@ -33,6 +33,7 @@ defmodule Sadld.Provider do
     * `:model` - the session's model name
     * `:on_text` - a `(String.t() -> any())` callback for each chunk of
       reply text, called in order before `c:chat/2` returns
+    * `:system` - the system prompt, when the session has one
   """
   @callback chat(messages :: [message()], opts :: keyword()) ::
               {:ok, response()} | {:error, term()}

@@ -83,6 +83,19 @@ defmodule Sadld.Provider.OpenAITest do
            }
   end
 
+  test "sends the system prompt as the first message" do
+    stub_stream(["data: [DONE]\n\n"])
+
+    {:ok, _reply} = OpenAI.chat([%{role: :user, content: "hi"}], opts(system: "Be brief."))
+
+    assert_received {:request, _conn, body}
+
+    assert body["messages"] == [
+             %{"role" => "system", "content" => "Be brief."},
+             %{"role" => "user", "content" => "hi"}
+           ]
+  end
+
   test "uses the configured base URL and falls back to the default model" do
     stub_stream(["data: [DONE]\n\n"])
 

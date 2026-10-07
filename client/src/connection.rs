@@ -5,6 +5,7 @@
 //! [`Connection::recv`] reads one server message per line.
 
 use std::env;
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -13,8 +14,8 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use crate::protocol::{
-    Call, HandshakeParams, HandshakeResult, JsonRpc, Outcome, PROTOCOL_VERSION, Request,
-    ServerMessage,
+    Call, ErrorObject, HandshakeParams, HandshakeResult, JsonRpc, Outcome, PROTOCOL_VERSION,
+    Request, ServerMessage,
 };
 
 /// The server socket under a runtime directory: `<dir>/sadl/sadld.sock`.
@@ -29,6 +30,47 @@ pub fn default_socket_path() -> Option<PathBuf> {
         .map(|dir| socket_path_in(Path::new(&dir)))
 }
 
+/// Why [`Connection::connect`] failed.
+#[derive(Debug)]
+pub enum ConnectError {
+    /// The socket could not be reached, or broke or misbehaved during the
+    /// handshake. Worth retrying.
+    Io(io::Error),
+    /// The server answered the handshake with an error, such as `-32000`
+    /// for an unsupported protocol version. Retrying will not help.
+    Rejected(ErrorObject),
+}
+
+impl fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "cannot reach sadld: {error}"),
+            Self::Rejected(error) => {
+                write!(
+                    f,
+                    "sadld rejected the handshake ({}): {}",
+                    error.code, error.message
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConnectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Rejected(_) => None,
+        }
+    }
+}
+
+impl From<io::Error> for ConnectError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
 /// One handshaken connection to the server.
 #[derive(Debug)]
 pub struct Connection {
@@ -39,10 +81,7 @@ pub struct Connection {
 
 impl Connection {
     /// Connects to the socket at `path` and completes the handshake.
-    ///
-    /// Fails with the socket's I/O error, or with an error naming the
-    /// server's reason if it rejects the handshake.
-    pub async fn connect(path: &Path) -> io::Result<Self> {
+    pub async fn connect(path: &Path) -> Result<Self, ConnectError> {
         let (read, writer) = UnixStream::connect(path).await?.into_split();
         let mut conn = Self {
             lines: BufReader::new(read).lines(),
@@ -53,7 +92,7 @@ impl Connection {
         Ok(conn)
     }
 
-    async fn handshake(&mut self) -> io::Result<()> {
+    async fn handshake(&mut self) -> Result<(), ConnectError> {
         let id = self
             .send(Call::Handshake(HandshakeParams {
                 protocol_version: PROTOCOL_VERSION,
@@ -64,21 +103,23 @@ impl Connection {
             Some(other) => {
                 return Err(invalid_data(format!(
                     "expected the handshake response, got {other:?}"
-                )));
+                ))
+                .into());
             }
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "server closed the connection during the handshake",
-                ));
+                )
+                .into());
             }
         };
-        match response.into_typed::<HandshakeResult>()?.outcome {
+        let typed = response
+            .into_typed::<HandshakeResult>()
+            .map_err(io::Error::from)?;
+        match typed.outcome {
             Outcome::Result(_) => Ok(()),
-            Outcome::Error(error) => Err(io::Error::other(format!(
-                "handshake rejected ({}): {}",
-                error.code, error.message
-            ))),
+            Outcome::Error(error) => Err(ConnectError::Rejected(error)),
         }
     }
 

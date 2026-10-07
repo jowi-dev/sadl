@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::time::Duration;
 
-use sadl::connection::{Connection, socket_path_in};
+use sadl::connection::{ConnectError, Connection, socket_path_in};
 use sadl::protocol::{
     Call, HandshakeParams, JsonRpc, Request, ServerMessage, SessionIdParams, SessionListParams,
 };
@@ -65,6 +65,10 @@ async fn connect_fails_when_the_server_rejects_the_version() {
     let error = Connection::connect(&path).await.expect_err("rejected");
 
     assert!(
+        matches!(&error, ConnectError::Rejected(e) if e.code == -32000),
+        "{error:?}"
+    );
+    assert!(
         error.to_string().contains("unsupported protocol version"),
         "{error}"
     );
@@ -76,7 +80,10 @@ async fn connect_fails_when_no_server_listens() {
         .await
         .expect_err("no server");
 
-    assert_eq!(error.kind(), ErrorKind::NotFound);
+    assert!(
+        matches!(&error, ConnectError::Io(e) if e.kind() == ErrorKind::NotFound),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]

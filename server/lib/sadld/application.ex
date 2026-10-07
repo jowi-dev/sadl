@@ -11,6 +11,7 @@ defmodule Sadld.Application do
       [
         {Sadld.Store, path: store_path()},
         {Registry, keys: :unique, name: Sadld.SessionRegistry},
+        Sadld.SessionEvents,
         {Task.Supervisor, name: Sadld.TurnSupervisor},
         {DynamicSupervisor, name: Sadld.SessionSupervisor, strategy: :one_for_one}
       ] ++ listener_children()

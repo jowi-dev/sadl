@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use sadl::autostart::{StartError, connect_or_start};
+use sadl::autostart::{StartError, connect_or_start, sadld_command, spawn_detached};
 use sadl::connection::ConnectError;
 use support::Peer;
 use tokio::net::UnixListener;
@@ -188,4 +188,46 @@ async fn does_not_launch_when_the_server_rejects_the_handshake() {
         ),
         "{result:?}"
     );
+}
+
+#[test]
+fn sadld_command_starts_the_release_in_the_foreground() {
+    let command = sadld_command();
+
+    let args: Vec<_> = command.get_args().collect();
+    assert_eq!(args, ["start"]);
+}
+
+#[tokio::test]
+async fn spawn_detached_puts_the_server_in_its_own_process_group() {
+    let out = support::socket_path().with_extension("pgrp");
+    let mut command = std::process::Command::new("sh");
+    command.arg("-c").arg(format!(
+        "read -r pid _ _ _ pgrp _ < /proc/self/stat; echo \"$pid $pgrp\" > {}.tmp; mv {0}.tmp {0}",
+        out.display()
+    ));
+
+    spawn_detached(command).unwrap();
+
+    let written = within(async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&out) {
+                return text;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    std::fs::remove_file(&out).unwrap();
+    let (pid, pgrp) = written.trim().split_once(' ').unwrap();
+    assert_eq!(pid, pgrp, "{written}");
+}
+
+#[tokio::test]
+async fn spawn_detached_reports_a_missing_program() {
+    let command = std::process::Command::new("/nonexistent/sadld");
+
+    let error = spawn_detached(command).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
 }

@@ -7,11 +7,14 @@
 //! that of many clients starting at once, only one launches a server; the
 //! rest wait for it.
 
+use std::env;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -58,7 +61,7 @@ impl std::error::Error for StartError {
 /// until the server completes the handshake or `timeout` passes.
 ///
 /// `launch` must return once the server is spawned, without waiting for it
-/// to listen. It is
+/// to listen; [`spawn_detached`] with [`sadld_command`] does that. It is
 /// called at most once, and only by the client that holds the lock on
 /// `sadld.lock` in the socket's directory (created owner-only if missing).
 /// The lock is held until this returns.
@@ -131,4 +134,29 @@ fn try_lock(path: &Path) -> io::Result<Option<File>> {
 
 fn lock_path(socket: &Path) -> PathBuf {
     socket.with_extension("lock")
+}
+
+/// The command that runs the server release in the foreground:
+/// `$SADLD start`, with `sadld` looked up on `PATH` when `SADLD` is unset.
+pub fn sadld_command() -> Command {
+    let program = env::var_os("SADLD")
+        .filter(|program| !program.is_empty())
+        .unwrap_or_else(|| OsString::from("sadld"));
+    let mut command = Command::new(program);
+    command.arg("start");
+    command
+}
+
+/// Spawns `command` detached from this client: in its own process group, so
+/// the terminal's signals do not reach it, with its standard streams on
+/// `/dev/null`. Returns once it is spawned. The child is reaped in the
+/// background, so it must be called within a Tokio runtime.
+pub fn spawn_detached(command: Command) -> io::Result<()> {
+    tokio::process::Command::from(command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map(drop)
 }

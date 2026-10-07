@@ -5,7 +5,8 @@ defmodule Sadld.Test.StubProvider do
 
   A one-argument `:respond` gets the message list, and its reply text is
   streamed as a single chunk. A two-argument one also gets the `:on_text`
-  callback, to stream text however it likes.
+  callback, to stream text however it likes, and a three-argument one also
+  gets the options the provider was called with.
   """
 
   @behaviour Sadld.Provider
@@ -15,6 +16,9 @@ defmodule Sadld.Test.StubProvider do
     on_text = Keyword.fetch!(opts, :on_text)
 
     case Keyword.fetch!(opts, :respond) do
+      respond when is_function(respond, 3) ->
+        respond.(messages, on_text, opts)
+
       respond when is_function(respond, 2) ->
         respond.(messages, on_text)
 

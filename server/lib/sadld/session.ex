@@ -58,6 +58,9 @@ defmodule Sadld.Session do
     * `:model` (required) - model name, passed to the provider as `:model`
     * `:provider` (required) - `{module, opts}` for a `Sadld.Provider`
     * `:tools` (required) - `{module, opts}` for a `Sadld.ToolRunner`
+    * `:system_prompt` - system prompt passed to the provider as `:system`
+      (default `Sadld.SystemPrompt.build/1` of `:cwd`, built once at start
+      so later edits to context files reach only new sessions)
   """
   @spec start(keyword()) :: {:ok, id()} | {:error, term()}
   def start(opts) do
@@ -149,12 +152,21 @@ defmodule Sadld.Session do
     {provider, provider_opts} = Keyword.fetch!(opts, :provider)
     id = Keyword.fetch!(opts, :id)
     model = Keyword.fetch!(opts, :model)
+    cwd = Keyword.fetch!(opts, :cwd)
+
+    system_prompt =
+      Keyword.get_lazy(opts, :system_prompt, fn -> Sadld.SystemPrompt.build(cwd) end)
+
+    provider_opts =
+      provider_opts
+      |> Keyword.put(:model, model)
+      |> Keyword.put(:system, system_prompt)
 
     state = %{
       id: id,
-      cwd: Keyword.fetch!(opts, :cwd),
+      cwd: cwd,
       model: model,
-      provider: {provider, Keyword.put(provider_opts, :model, model)},
+      provider: {provider, provider_opts},
       tools: Keyword.fetch!(opts, :tools),
       messages: Store.messages(id),
       updated_at: now(),

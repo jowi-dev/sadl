@@ -427,4 +427,57 @@ defmodule Sadld.SessionTest do
         wait_until(check, message, attempts - 1)
     end
   end
+
+  describe "system prompt" do
+    defp start_echo_session(opts) do
+      {:ok, id} =
+        Session.start(
+          Keyword.merge(
+            [
+              cwd: "/tmp/project",
+              model: "stub-model",
+              provider: echo_system(),
+              tools: {StubTools, run: fn _call, _cwd -> {:ok, "ok"} end}
+            ],
+            opts
+          )
+        )
+
+      :ok = SessionEvents.subscribe(id)
+      id
+    end
+
+    defp provider_system(id) do
+      {:ok, turn_id} = Session.send_message(id, "hi")
+      [%Notification{method: "turn.delta", params: %{text: text}}, _end] = collect_turn(turn_id)
+      text
+    end
+
+    # A provider that replies with the system prompt the session gave it.
+    defp echo_system do
+      {StubProvider,
+       respond: fn _messages, on_text, opts ->
+         text = Keyword.get(opts, :system, "<none>")
+         on_text.(text)
+         reply(text)
+       end}
+    end
+
+    test "is passed to the provider as :system" do
+      id = start_echo_session(system_prompt: "Be brief.")
+
+      assert provider_system(id) == "Be brief."
+    end
+
+    @tag :tmp_dir
+    test "defaults to one built from the cwd's context files", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "AGENTS.md"), "project rules")
+
+      id = start_echo_session(cwd: tmp_dir)
+
+      system = provider_system(id)
+      assert system =~ "Working directory: #{tmp_dir}"
+      assert system =~ "project rules"
+    end
+  end
 end

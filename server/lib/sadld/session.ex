@@ -46,6 +46,8 @@ defmodule Sadld.Session do
 
   @type id :: String.t()
 
+  @type info :: %{id: id(), cwd: Path.t(), model: String.t(), updated_at: DateTime.t()}
+
   @doc """
   Records a new session in `Sadld.Store`, starts it under
   `Sadld.SessionSupervisor` and returns its id.
@@ -125,6 +127,13 @@ defmodule Sadld.Session do
   @spec messages(id()) :: [Sadld.Provider.message()] | {:error, :not_found}
   def messages(id), do: call(id, :messages)
 
+  @doc """
+  Describes the session: its `id`, `cwd` and `model`, and `updated_at`, the
+  UTC time its message list last changed (or it started).
+  """
+  @spec info(id()) :: info() | {:error, :not_found}
+  def info(id), do: call(id, :info)
+
   defp call(id, request) do
     GenServer.call(via(id), request)
   catch
@@ -139,13 +148,16 @@ defmodule Sadld.Session do
   def init(opts) do
     {provider, provider_opts} = Keyword.fetch!(opts, :provider)
     id = Keyword.fetch!(opts, :id)
+    model = Keyword.fetch!(opts, :model)
 
     state = %{
       id: id,
       cwd: Keyword.fetch!(opts, :cwd),
-      provider: {provider, Keyword.put(provider_opts, :model, Keyword.fetch!(opts, :model))},
+      model: model,
+      provider: {provider, Keyword.put(provider_opts, :model, model)},
       tools: Keyword.fetch!(opts, :tools),
       messages: Store.messages(id),
+      updated_at: now(),
       turn: nil
     }
 
@@ -171,6 +183,10 @@ defmodule Sadld.Session do
   end
 
   def handle_call(:messages, _from, state), do: {:reply, state.messages, state}
+
+  def handle_call(:info, _from, state) do
+    {:reply, Map.take(state, [:id, :cwd, :model, :updated_at]), state}
+  end
 
   @impl true
   def handle_continue({:start_turn, turn_id}, state) do
@@ -219,8 +235,10 @@ defmodule Sadld.Session do
 
   defp append_messages(state, messages) do
     :ok = Store.append_messages(state.id, messages)
-    %{state | messages: state.messages ++ messages}
+    %{state | messages: state.messages ++ messages, updated_at: now()}
   end
+
+  defp now, do: DateTime.utc_now(:second)
 
   defp fail_turn(state, reason) do
     notify(state, "error", %{code: @internal_error, message: inspect(reason)})

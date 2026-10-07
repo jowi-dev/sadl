@@ -59,6 +59,21 @@ defmodule Sadld.SessionTest do
     assert Session.whereis("missing") == nil
   end
 
+  test "info describes the session and when its messages last changed" do
+    id = start_session(fn _ -> reply("hi") end)
+
+    assert %{id: ^id, cwd: "/tmp/project", model: "stub-model", updated_at: started} =
+             Session.info(id)
+
+    assert %DateTime{time_zone: "Etc/UTC"} = started
+
+    {:ok, turn_id} = Session.send_message(id, "hi")
+    collect_turn(turn_id)
+
+    assert DateTime.compare(Session.info(id).updated_at, started) in [:gt, :eq]
+    assert Session.info("missing") == {:error, :not_found}
+  end
+
   test "a turn without tool calls streams the reply and completes" do
     id = start_session(fn _ -> reply("hello") end)
 

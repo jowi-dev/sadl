@@ -2,7 +2,7 @@ defmodule Sadld.ToolsTest do
   use ExUnit.Case, async: true
 
   alias Sadld.Protocol.Notification
-  alias Sadld.Session
+  alias Sadld.{Session, SessionEvents}
   alias Sadld.Test.StubProvider
   alias Sadld.Tools
 
@@ -56,10 +56,10 @@ defmodule Sadld.ToolsTest do
         cwd: dir,
         model: "stub-model",
         provider: {StubProvider, respond: respond},
-        tools: {Tools, []},
-        listener: self()
+        tools: {Tools, []}
       )
 
+    :ok = SessionEvents.subscribe(id)
     {:ok, turn_id} = Session.send_message(id, "read it")
 
     assert_receive {:session_event, ^id,

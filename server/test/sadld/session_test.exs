@@ -2,7 +2,7 @@ defmodule Sadld.SessionTest do
   use ExUnit.Case, async: true
 
   alias Sadld.Protocol.Notification
-  alias Sadld.{Session, Store}
+  alias Sadld.{Session, SessionEvents, Store}
   alias Sadld.Test.{StubProvider, StubTools}
 
   @usage %{input_tokens: 3, output_tokens: 2}
@@ -14,8 +14,7 @@ defmodule Sadld.SessionTest do
 
     [
       provider: {StubProvider, respond: respond},
-      tools: {StubTools, run: run},
-      listener: self()
+      tools: {StubTools, run: run}
     ]
   end
 
@@ -23,6 +22,7 @@ defmodule Sadld.SessionTest do
     {:ok, id} =
       Session.start([cwd: "/tmp/project", model: "stub-model"] ++ session_opts(respond, opts))
 
+    :ok = SessionEvents.subscribe(id)
     id
   end
 
@@ -39,6 +39,15 @@ defmodule Sadld.SessionTest do
     after
       1_000 -> flunk("turn #{turn_id} did not end; got #{inspect(Enum.reverse(acc))}")
     end
+  end
+
+  # Forwards everything this process receives to `pid`, tagged `:watcher`.
+  defp relay(pid) do
+    receive do
+      message -> send(pid, {:watcher, message})
+    end
+
+    relay(pid)
   end
 
   test "start registers the session under a fresh id" do
@@ -75,7 +84,25 @@ defmodule Sadld.SessionTest do
            ]
   end
 
-  test "text the provider streams reaches the listener chunk by chunk" do
+  test "every subscriber to the session sees the same stream" do
+    id = start_session(fn _ -> reply("hello") end)
+    test_pid = self()
+
+    spawn_link(fn ->
+      :ok = SessionEvents.subscribe(id)
+      send(test_pid, :subscribed)
+      relay(test_pid)
+    end)
+
+    assert_receive :subscribed
+    {:ok, turn_id} = Session.send_message(id, "hi")
+
+    for notification <- collect_turn(turn_id) do
+      assert_receive {:watcher, {:session_event, ^id, ^notification}}
+    end
+  end
+
+  test "text the provider streams reaches subscribers chunk by chunk" do
     respond = fn _messages, on_text ->
       on_text.("hel")
       on_text.("lo")

@@ -2,7 +2,7 @@ defmodule Sadld.Tools.BashTest do
   use ExUnit.Case, async: true
 
   alias Sadld.Protocol.Notification
-  alias Sadld.Session
+  alias Sadld.{Session, SessionEvents}
   alias Sadld.Test.StubProvider
   alias Sadld.Tools.Bash
 
@@ -129,10 +129,10 @@ defmodule Sadld.Tools.BashTest do
         cwd: dir,
         model: "stub-model",
         provider: {StubProvider, respond: respond},
-        tools: {Bash, []},
-        listener: self()
+        tools: {Bash, []}
       )
 
+    :ok = SessionEvents.subscribe(id)
     {:ok, turn_id} = Session.send_message(id, "go")
     assert_receive {:session_event, ^id, %Notification{method: "tool.call"}}
     os_pid = read_pid(dir)

@@ -10,11 +10,12 @@ defmodule Sadld.Session do
   The loop runs in a task under `Sadld.TurnSupervisor` so the session keeps
   answering calls, and `cancel/1` can kill it mid-turn.
 
-  Progress reaches the session's `:listener` as
+  Progress is broadcast on the session's `Sadld.SessionEvents` topic, so
+  every subscriber receives
   `{:session_event, session_id, %Sadld.Protocol.Notification{}}` messages:
   the `turn.delta`, `tool.call`, `tool.result`, `turn.end` and `error`
   notifications of `docs/protocol.md`, in order. All of them are sent by
-  the session process, so a listener that also made the `send_message/2`
+  the session process, so a subscriber that also made the `send_message/2`
   call gets the reply before the turn's first notification.
 
   A turn appends to the message list only at consistent points: the user
@@ -32,7 +33,7 @@ defmodule Sadld.Session do
   use GenServer, restart: :transient
 
   alias Sadld.Protocol.Notification
-  alias Sadld.Store
+  alias Sadld.{SessionEvents, Store}
 
   @registry Sadld.SessionRegistry
   @supervisor Sadld.SessionSupervisor
@@ -55,7 +56,6 @@ defmodule Sadld.Session do
     * `:model` (required) - model name, passed to the provider as `:model`
     * `:provider` (required) - `{module, opts}` for a `Sadld.Provider`
     * `:tools` (required) - `{module, opts}` for a `Sadld.ToolRunner`
-    * `:listener` - pid that receives the session's notifications
   """
   @spec start(keyword()) :: {:ok, id()} | {:error, term()}
   def start(opts) do
@@ -72,10 +72,9 @@ defmodule Sadld.Session do
   @doc """
   Brings back the stored session `id` and returns its info. A session that
   is not running is started with its stored `:cwd` and `:model` and its
-  stored messages; one already running is left as it is, keeping its
-  listener.
+  stored messages; one already running is left as it is.
 
-  Takes the `:provider`, `:tools` and `:listener` options of `start/1`.
+  Takes the `:provider` and `:tools` options of `start/1`.
   """
   @spec resume(id(), keyword()) :: {:ok, Store.session_info()} | {:error, :not_found | term()}
   def resume(id, opts) do
@@ -146,7 +145,6 @@ defmodule Sadld.Session do
       cwd: Keyword.fetch!(opts, :cwd),
       provider: {provider, Keyword.put(provider_opts, :model, Keyword.fetch!(opts, :model))},
       tools: Keyword.fetch!(opts, :tools),
-      listener: Keyword.get(opts, :listener),
       messages: Store.messages(id),
       turn: nil
     }
@@ -234,15 +232,9 @@ defmodule Sadld.Session do
     %{state | turn: nil}
   end
 
-  defp notify(%{listener: nil}, _method, _params), do: :ok
-
   defp notify(state, method, params) do
     params = Map.put(params, :session_id, state.id)
-
-    send(
-      state.listener,
-      {:session_event, state.id, %Notification{method: method, params: params}}
-    )
+    SessionEvents.broadcast(state.id, %Notification{method: method, params: params})
   end
 
   defp add_usage(a, b) do

@@ -53,9 +53,9 @@ in one long-lived server.
   sessions are unaffected.
 - **Tools run on the server**, in the session's `cwd` (sent by the client on
   `session.open`). The server and client are on the same machine, so this is
-  safe and keeps the client thin. Shell execution uses `erlexec` or
-  `MuonTrap` rather than raw `Port`s (process-group kill, no orphaned
-  children on timeout).
+  safe and keeps the client thin. Shell execution uses `erlexec`
+  rather than raw `Port`s (process-group kill, no orphaned
+  children on timeout; see ADR-0002).
 - Provider behaviour with streaming (Req/Finch + SSE). Start with an
   OpenAI-compatible adapter pointed at Venice.ai; it also covers
   OpenRouter/Ollama. Anthropic's Messages API is a later adapter.

@@ -61,6 +61,8 @@ in one long-lived server.
   OpenRouter/Ollama. Anthropic's Messages API is a later adapter.
 - Every turn is persisted before it is acknowledged, so a server restart
   loses at most the in-flight request.
+- Sessions and their messages, tool calls and results included, live in
+  SQLite at `$XDG_DATA_HOME/sadl/sadl.db` (`exqlite`, no Ecto).
 
 ### Protocol
 

@@ -9,6 +9,7 @@ defmodule Sadld.Application do
   def start(_type, _args) do
     children =
       [
+        {Sadld.Store, path: store_path()},
         {Registry, keys: :unique, name: Sadld.SessionRegistry},
         {Task.Supervisor, name: Sadld.TurnSupervisor},
         {DynamicSupervisor, name: Sadld.SessionSupervisor, strategy: :one_for_one}
@@ -19,6 +20,8 @@ defmodule Sadld.Application do
     opts = [strategy: :one_for_one, name: Sadld.Supervisor]
     Supervisor.start_link(children, opts)
   end
+
+  defp store_path, do: Application.get_env(:sadld, :store_path) || Sadld.Store.default_path()
 
   # The listener starts last so session infrastructure is up before any
   # client can connect. Tests disable it via `config :sadld, listen: false`.

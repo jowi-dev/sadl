@@ -38,7 +38,11 @@ in one long-lived server.
   no conversation state beyond what it is drawing, no LLM calls, no tool
   execution.
 - On start: connect to the server's Unix socket, and spawn `sadld` if the
-  socket is missing (auto-start daemon, like `tmux` itself).
+  socket is missing or refuses connections (auto-start daemon, like `tmux`
+  itself). The client runs `$SADLD start` (`sadld` from `PATH` by default)
+  detached in its own process group, then polls the socket until the server
+  answers or a timeout passes. An exclusive lock on `sadld.lock` beside the
+  socket lets only one of many clients starting at once launch a server.
 - Modes, mirroring what `tm`'s `AgentRunner` needs:
   - interactive: `sadl [--model M] [--resume ID] [PROMPT]`
   - headless: `sadl -p PROMPT --output-format json` → prints a `RunOutcome`

@@ -29,7 +29,8 @@ defmodule Sadld.MixProject do
       {:req, "~> 0.5"},
       {:plug, "~> 1.16", only: :test},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:erlexec, "~> 2.2"}
+      {:erlexec, "~> 2.2"},
+      {:exqlite, "~> 0.42"}
     ]
   end
 end

@@ -2,24 +2,26 @@ defmodule Sadld.SessionTest do
   use ExUnit.Case, async: true
 
   alias Sadld.Protocol.Notification
-  alias Sadld.Session
+  alias Sadld.{Session, Store}
   alias Sadld.Test.{StubProvider, StubTools}
 
   @usage %{input_tokens: 3, output_tokens: 2}
 
   defp reply(text), do: {:ok, %{text: text, tool_calls: [], usage: @usage}}
 
-  defp start_session(respond, opts \\ []) do
+  defp session_opts(respond, opts \\ []) do
     run = Keyword.get(opts, :run, fn _call, _cwd -> {:ok, "ok"} end)
 
+    [
+      provider: {StubProvider, respond: respond},
+      tools: {StubTools, run: run},
+      listener: self()
+    ]
+  end
+
+  defp start_session(respond, opts \\ []) do
     {:ok, id} =
-      Session.start(
-        cwd: "/tmp/project",
-        model: "stub-model",
-        provider: {StubProvider, respond: respond},
-        tools: {StubTools, run: run},
-        listener: self()
-      )
+      Session.start([cwd: "/tmp/project", model: "stub-model"] ++ session_opts(respond, opts))
 
     id
   end
@@ -263,5 +265,124 @@ defmodule Sadld.SessionTest do
 
     assert [_delta, %Notification{method: "turn.end", params: %{stop_reason: "completed"}}] =
              collect_turn(turn_id)
+  end
+
+  describe "persistence" do
+    test "start records the session in the store" do
+      id = start_session(fn _ -> reply("hi") end)
+
+      assert {:ok, %{id: ^id, cwd: "/tmp/project", model: "stub-model"}} =
+               Store.fetch_session(id)
+
+      assert id in Enum.map(Session.list(), & &1.id)
+    end
+
+    test "the user message is stored before send_message returns" do
+      id =
+        start_session(fn _ ->
+          receive do
+            :release -> reply("late")
+          end
+        end)
+
+      {:ok, _turn_id} = Session.send_message(id, "hi")
+
+      assert Store.messages(id) == [%{role: :user, content: "hi"}]
+    end
+
+    test "every message of a turn is stored, tool calls and results included" do
+      call = %{id: "call_1", name: "read", args: %{"path" => "a.txt"}}
+
+      respond = fn messages ->
+        case List.last(messages) do
+          %{role: :user} -> {:ok, %{text: "", tool_calls: [call], usage: @usage}}
+          %{role: :tool} -> reply("done")
+        end
+      end
+
+      id = start_session(respond)
+      {:ok, turn_id} = Session.send_message(id, "read a.txt")
+      collect_turn(turn_id)
+
+      assert length(Store.messages(id)) == 4
+      assert Store.messages(id) == Session.messages(id)
+    end
+
+    test "a restarted session rebuilds its messages from the store" do
+      id = start_session(fn _ -> reply("hello") end)
+      {:ok, turn_id} = Session.send_message(id, "hi")
+      collect_turn(turn_id)
+      before = Session.messages(id)
+
+      pid = Session.whereis(id)
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+
+      wait_until(fn -> Session.whereis(id) not in [nil, pid] end, "session #{id} not restarted")
+      assert Session.messages(id) == before
+    end
+  end
+
+  describe "resume" do
+    test "starts a stopped session from the store with its history" do
+      test_pid = self()
+
+      id = start_session(fn _ -> reply("hello") end)
+      {:ok, turn_id} = Session.send_message(id, "hi")
+      collect_turn(turn_id)
+      stop_session(id)
+
+      respond = fn messages ->
+        send(test_pid, {:history, messages})
+        reply("welcome back")
+      end
+
+      assert {:ok, %{id: ^id, cwd: "/tmp/project", model: "stub-model"}} =
+               Session.resume(id, session_opts(respond))
+
+      {:ok, turn_id} = Session.send_message(id, "again")
+      collect_turn(turn_id)
+
+      assert_receive {:history,
+                      [
+                        %{role: :user, content: "hi"},
+                        %{role: :assistant, content: "hello"},
+                        %{role: :user, content: "again"}
+                      ]}
+    end
+
+    test "returns the info of a session that is already running" do
+      id = start_session(fn _ -> reply("hi") end)
+      pid = Session.whereis(id)
+
+      assert {:ok, %{id: ^id}} = Session.resume(id, session_opts(fn _ -> reply("x") end))
+      assert Session.whereis(id) == pid
+    end
+
+    test "an unknown id is :not_found" do
+      assert Session.resume("missing", session_opts(fn _ -> reply("x") end)) ==
+               {:error, :not_found}
+    end
+  end
+
+  defp stop_session(id) do
+    :ok = DynamicSupervisor.terminate_child(Sadld.SessionSupervisor, Session.whereis(id))
+    wait_until(fn -> Session.whereis(id) == nil end, "session #{id} still registered")
+  end
+
+  # The registry drops a dead process asynchronously, so poll for changes.
+  defp wait_until(check, message, attempts \\ 50) do
+    cond do
+      check.() ->
+        :ok
+
+      attempts == 0 ->
+        flunk(message)
+
+      true ->
+        Process.sleep(10)
+        wait_until(check, message, attempts - 1)
+    end
   end
 end

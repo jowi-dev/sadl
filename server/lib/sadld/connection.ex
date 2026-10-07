@@ -7,14 +7,20 @@ defmodule Sadld.Connection do
   in `docs/protocol.md`. The first request must be `handshake`; any other
   request before a successful handshake gets error `-32001`.
 
-  Session methods are not implemented yet and answer with an internal
-  error.
+  `session.open` starts a `Sadld.Session` and `session.resume` attaches to
+  a running one; both subscribe the connection to the session's
+  `Sadld.SessionEvents` topic, and every notification on it is written to
+  the socket. Several connections can attach to one session and each sees
+  the whole stream. `session.send` and `session.cancel` work on any running
+  session. Resuming a session that is not running, and `session.list`, wait
+  on persistence and answer with session not found and an internal error.
   """
 
   use GenServer, restart: :temporary
 
-  alias Sadld.Protocol
-  alias Sadld.Protocol.{Request, Response}
+  alias Sadld.{Protocol, Session, SessionEvents}
+  alias Sadld.Protocol.{Notification, Request, Response}
+  alias Sadld.Provider.OpenAI
 
   @parse_error -32_700
   @invalid_request -32_600
@@ -23,20 +29,49 @@ defmodule Sadld.Connection do
   @internal_error -32_603
   @unsupported_version -32_000
   @handshake_required -32_001
+  @session_not_found -32_002
+  @session_busy -32_003
 
   @doc """
   Starts a connection for an accepted socket. The caller must make the new
   process the socket's controlling process and then call `activate/1`.
+
+  ## Options
+
+    * `:socket` (required) - the accepted client socket
+    * `:session` - how `session.open` starts sessions, as `:provider` and
+      `:tools` for `Sadld.Session.start/1` and `:model`, the model used when
+      the request names none. Missing keys default to the OpenAI provider
+      offered `Sadld.Tools`, and the provider's configured model.
   """
-  @spec start_link(:gen_tcp.socket()) :: GenServer.on_start()
-  def start_link(socket), do: GenServer.start_link(__MODULE__, socket)
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   @doc "Starts reading from the socket once this process controls it."
   @spec activate(pid()) :: :ok
   def activate(pid), do: GenServer.cast(pid, :activate)
 
   @impl true
-  def init(socket), do: {:ok, %{socket: socket, handshaken?: false, overflow?: false}}
+  def init(opts) do
+    state = %{
+      socket: Keyword.fetch!(opts, :socket),
+      session: Keyword.merge(default_session(), opts[:session] || []),
+      handshaken?: false,
+      overflow?: false
+    }
+
+    {:ok, state}
+  end
+
+  defp default_session do
+    config = Application.get_env(:sadld, OpenAI, [])
+
+    [
+      provider: {OpenAI, tools: Sadld.Tools.specs()},
+      tools: {Sadld.Tools, []},
+      model: Keyword.get(config, :model, OpenAI.default_model())
+    ]
+  end
 
   @impl true
   def handle_cast(:activate, state), do: {:noreply, read_next(state)}
@@ -51,6 +86,11 @@ defmodule Sadld.Connection do
   def handle_info({:tcp_error, socket, _reason}, %{socket: socket} = state),
     do: {:stop, :normal, state}
 
+  def handle_info({:session_event, _id, %Notification{} = notification}, state) do
+    write(state, notification)
+    {:noreply, state}
+  end
+
   defp read_next(state) do
     :inet.setopts(state.socket, active: :once)
     state
@@ -64,12 +104,12 @@ defmodule Sadld.Connection do
         %{state | overflow?: true}
 
       state.overflow? ->
-        reply(state, error(nil, @invalid_request, "line too long"))
+        write(state, error(nil, @invalid_request, "line too long"))
         %{state | overflow?: false}
 
       true ->
         {response, state} = handle_line(data, state)
-        reply(state, response)
+        write(state, response)
         state
     end
   end
@@ -125,14 +165,65 @@ defmodule Sadld.Connection do
   defp dispatch(%Request{id: id}, %{handshaken?: false} = state),
     do: {error(id, @handshake_required, "handshake required"), state}
 
+  defp dispatch(%Request{method: "session.open", id: id, params: params} = request, state) do
+    opts = [
+      cwd: params.cwd,
+      model: Map.get(params, :model, state.session[:model]),
+      provider: state.session[:provider],
+      tools: state.session[:tools]
+    ]
+
+    case Session.start(opts) do
+      {:ok, session_id} -> {attach(request, session_id), state}
+      {:error, reason} -> {error(id, @internal_error, inspect(reason)), state}
+    end
+  end
+
+  defp dispatch(%Request{method: "session.resume", params: %{id: session_id}} = request, state),
+    do: {attach(request, session_id), state}
+
+  defp dispatch(%Request{method: "session.send", id: id, params: params}, state) do
+    case Session.send_message(params.id, params.text) do
+      {:ok, turn_id} -> {result(id, "session.send", %{turn_id: turn_id}), state}
+      {:error, reason} -> {session_error(id, reason), state}
+    end
+  end
+
+  defp dispatch(%Request{method: "session.cancel", id: id, params: params}, state) do
+    case Session.cancel(params.id) do
+      :ok -> {result(id, "session.cancel", %{}), state}
+      {:error, reason} -> {session_error(id, reason), state}
+    end
+  end
+
   defp dispatch(%Request{id: id}, state),
     do: {error(id, @internal_error, "not implemented"), state}
+
+  # Subscribes before reading the info so no notification falls between
+  # the two; the response still goes out before any of them is written.
+  defp attach(%Request{id: id, method: method}, session_id) do
+    :ok = SessionEvents.subscribe(session_id)
+
+    case Session.info(session_id) do
+      {:error, reason} ->
+        SessionEvents.unsubscribe(session_id)
+        session_error(id, reason)
+
+      info ->
+        result(id, method, %{info | updated_at: DateTime.to_iso8601(info.updated_at)})
+    end
+  end
+
+  defp session_error(id, :not_found), do: error(id, @session_not_found, "session not found")
+  defp session_error(id, :busy), do: error(id, @session_busy, "session busy")
+
+  defp result(id, method, result), do: %Response{id: id, method: method, result: result}
 
   defp error(id, code, message, data \\ nil) do
     %Response{id: id, error: %{code: code, message: message, data: data}}
   end
 
-  defp reply(state, response) do
-    :gen_tcp.send(state.socket, [JSON.encode!(Protocol.to_map(response)), ?\n])
+  defp write(state, message) do
+    :gen_tcp.send(state.socket, [JSON.encode!(Protocol.to_map(message)), ?\n])
   end
 end

@@ -20,6 +20,8 @@ defmodule Sadld.Listener do
     * `:name` - the supervisor name, `Sadld.Listener` if absent
     * `:max_line_length` - longest request line in bytes; longer lines are
       answered with an invalid request error (default 1 MiB)
+    * `:session` - how clients' sessions are started; see
+      `Sadld.Connection.start_link/1`
   """
 
   use Supervisor

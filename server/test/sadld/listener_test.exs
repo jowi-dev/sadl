@@ -2,6 +2,9 @@ defmodule Sadld.ListenerTest do
   use ExUnit.Case, async: true
 
   alias Sadld.Protocol
+  alias Sadld.Test.{StubProvider, StubTools}
+
+  @usage %{input_tokens: 1, output_tokens: 1}
 
   @fixtures_dir Path.expand("../../../protocol/fixtures", __DIR__)
 
@@ -46,6 +49,31 @@ defmodule Sadld.ListenerTest do
   end
 
   defp error_code(%{"error" => %{"code" => code}}), do: code
+
+  defp open(socket) do
+    %{"result" => %{"id" => id}} = request(socket, fixture("session.open.request.no-model.json"))
+    id
+  end
+
+  defp send_request(request_id, id, text),
+    do: %{
+      fixture("session.send.request.json")
+      | "id" => request_id,
+        "params" => %{"id" => id, "text" => text}
+    }
+
+  defp resume_request(id),
+    do: put_in(fixture("session.resume.request.json"), ["params", "id"], id)
+
+  defp cancel_request(request_id, id),
+    do: %{fixture("session.cancel.request.json") | "id" => request_id, "params" => %{"id" => id}}
+
+  # Reads notifications up to and including the next turn.end.
+  defp receive_turn(socket, acc \\ []) do
+    message = receive_message(socket)
+    acc = [message | acc]
+    if message["method"] == "turn.end", do: Enum.reverse(acc), else: receive_turn(socket, acc)
+  end
 
   describe "with a running listener" do
     setup %{path: path} do
@@ -137,6 +165,130 @@ defmodule Sadld.ListenerTest do
 
       response = request(other, fixture("session.list.request.json"))
       assert error_code(response) == -32_001
+    end
+  end
+
+  describe "with sessions" do
+    # The stub model echoes the user's text, except "wait", which blocks
+    # until the turn is cancelled.
+    setup %{path: path} do
+      respond = fn messages ->
+        case List.last(messages) do
+          %{content: "wait"} ->
+            receive do
+              :never -> :ok
+            end
+
+          %{content: text} ->
+            {:ok, %{text: "echo: " <> text, tool_calls: [], usage: @usage}}
+        end
+      end
+
+      session = [
+        provider: {StubProvider, respond: respond},
+        tools: {StubTools, run: fn _call, _cwd -> {:ok, ""} end},
+        model: "stub-default"
+      ]
+
+      {:ok, _pid} = start_listener(path, session: session)
+      %{socket: connect(path)}
+    end
+
+    test "opens a session in cwd with the default model", %{socket: socket} do
+      handshake(socket)
+
+      assert %{"id" => 1, "result" => info} =
+               request(socket, fixture("session.open.request.no-model.json"))
+
+      assert %{"cwd" => "/home/u/proj", "model" => "stub-default"} = info
+      assert is_binary(info["id"])
+      assert {:ok, _, 0} = DateTime.from_iso8601(info["updated_at"])
+    end
+
+    test "opens a session with the requested model", %{socket: socket} do
+      handshake(socket)
+      %{"result" => info} = request(socket, fixture("session.open.request.json"))
+
+      assert info["model"] == "glm-5.3-flash"
+    end
+
+    test "streams a turn's notifications after the send response", %{socket: socket} do
+      handshake(socket)
+      id = open(socket)
+
+      assert %{"id" => 7, "result" => %{"turn_id" => turn_id}} =
+               request(socket, send_request(7, id, "hi"))
+
+      assert [
+               %{"method" => "turn.delta", "params" => delta},
+               %{"method" => "turn.end", "params" => turn_end}
+             ] = receive_turn(socket)
+
+      assert delta == %{"session_id" => id, "turn_id" => turn_id, "text" => "echo: hi"}
+      assert turn_end["stop_reason"] == "completed"
+    end
+
+    test "every client attached to a session sees the same stream", %{path: path} = ctx do
+      handshake(ctx.socket)
+      id = open(ctx.socket)
+      other = connect(path)
+      handshake(other)
+
+      assert %{"id" => 2, "result" => %{"id" => ^id, "cwd" => "/home/u/proj"}} =
+               request(other, resume_request(id))
+
+      %{"result" => %{"turn_id" => _}} = request(ctx.socket, send_request(3, id, "hi"))
+      stream = receive_turn(ctx.socket)
+      assert receive_turn(other) == stream
+
+      %{"result" => %{"turn_id" => _}} = request(other, send_request(3, id, "again"))
+      stream = receive_turn(other)
+      assert receive_turn(ctx.socket) == stream
+    end
+
+    test "a client hears only the sessions it opened or attached to", %{path: path} = ctx do
+      handshake(ctx.socket)
+      id = open(ctx.socket)
+      bystander = connect(path)
+      handshake(bystander)
+      open(bystander)
+
+      %{"result" => _} = request(bystander, send_request(3, id, "hi"))
+      receive_turn(ctx.socket)
+
+      assert {:error, :timeout} = :gen_tcp.recv(bystander, 0, 100)
+    end
+
+    test "resuming an unknown session answers session not found", %{socket: socket} do
+      handshake(socket)
+
+      assert request(socket, fixture("session.resume.request.json")) ==
+               fixture("session.resume.response.not-found.json")
+    end
+
+    test "send and cancel on an unknown session answer session not found", %{socket: socket} do
+      handshake(socket)
+
+      assert error_code(request(socket, fixture("session.send.request.json"))) == -32_002
+      assert error_code(request(socket, fixture("session.cancel.request.json"))) == -32_002
+    end
+
+    test "a running turn makes send busy until it is cancelled", %{socket: socket} do
+      handshake(socket)
+      id = open(socket)
+
+      %{"result" => %{"turn_id" => turn_id}} = request(socket, send_request(3, id, "wait"))
+      assert error_code(request(socket, send_request(4, id, "hi"))) == -32_003
+
+      assert request(socket, cancel_request(5, id)) == %{
+               "jsonrpc" => "2.0",
+               "id" => 5,
+               "result" => %{}
+             }
+
+      assert [%{"method" => "turn.end", "params" => turn_end}] = receive_turn(socket)
+      assert turn_end["turn_id"] == turn_id
+      assert turn_end["stop_reason"] == "cancelled"
     end
   end
 

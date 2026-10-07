@@ -18,13 +18,14 @@ defmodule Sadld.Listener.Acceptor do
     path = Keyword.fetch!(opts, :path)
     connections = Keyword.fetch!(opts, :connections)
     max_line_length = Keyword.get(opts, :max_line_length, @default_max_line_length)
+    session = Keyword.get(opts, :session)
 
     with :ok <- check_length(path),
          :ok <- File.mkdir_p(Path.dirname(path)),
          :ok <- remove_stale(path),
          {:ok, socket} <- listen(path, max_line_length) do
       Process.flag(:trap_exit, true)
-      loop = spawn_link(fn -> accept_loop(socket, connections) end)
+      loop = spawn_link(fn -> accept_loop(socket, connections, session) end)
       {:ok, %{socket: socket, path: path, loop: loop}}
     else
       {:error, reason} -> {:stop, reason}
@@ -88,11 +89,11 @@ defmodule Sadld.Listener.Acceptor do
     end
   end
 
-  defp accept_loop(listen_socket, connections) do
+  defp accept_loop(listen_socket, connections, session) do
     case :gen_tcp.accept(listen_socket) do
       {:ok, socket} ->
-        hand_off(socket, connections)
-        accept_loop(listen_socket, connections)
+        hand_off(socket, connections, session)
+        accept_loop(listen_socket, connections, session)
 
       {:error, :closed} ->
         :ok
@@ -102,8 +103,10 @@ defmodule Sadld.Listener.Acceptor do
     end
   end
 
-  defp hand_off(socket, connections) do
-    case DynamicSupervisor.start_child(connections, {Sadld.Connection, socket}) do
+  defp hand_off(socket, connections, session) do
+    connection = {Sadld.Connection, socket: socket, session: session}
+
+    case DynamicSupervisor.start_child(connections, connection) do
       {:ok, pid} ->
         :ok = :gen_tcp.controlling_process(socket, pid)
         Sadld.Connection.activate(pid)

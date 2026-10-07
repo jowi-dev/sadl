@@ -21,11 +21,18 @@ defmodule Sadld.Session do
   message when it starts, then each assistant reply together with the
   results of its tool calls. A cancelled or failed turn keeps the steps it
   finished.
+
+  Every append is written to `Sadld.Store` first, and the user message is
+  stored before `send_message/2` replies. A session process rebuilds its
+  message list from the store when it starts, so one the supervisor
+  restarts after a crash, or one brought back by `resume/2`, carries on
+  where it left off. A turn that was running when the process died is lost.
   """
 
   use GenServer, restart: :transient
 
   alias Sadld.Protocol.Notification
+  alias Sadld.Store
 
   @registry Sadld.SessionRegistry
   @supervisor Sadld.SessionSupervisor
@@ -39,7 +46,8 @@ defmodule Sadld.Session do
   @type id :: String.t()
 
   @doc """
-  Starts a session under `Sadld.SessionSupervisor` and returns its id.
+  Records a new session in `Sadld.Store`, starts it under
+  `Sadld.SessionSupervisor` and returns its id.
 
   Options:
 
@@ -52,12 +60,39 @@ defmodule Sadld.Session do
   @spec start(keyword()) :: {:ok, id()} | {:error, term()}
   def start(opts) do
     id = new_id()
+    session = %{id: id, cwd: Keyword.fetch!(opts, :cwd), model: Keyword.fetch!(opts, :model)}
+    {:ok, _info} = Store.create_session(session)
 
-    case DynamicSupervisor.start_child(@supervisor, {__MODULE__, Keyword.put(opts, :id, id)}) do
+    case start_child(Keyword.put(opts, :id, id)) do
       {:ok, _pid} -> {:ok, id}
       {:error, reason} -> {:error, reason}
     end
   end
+
+  @doc """
+  Brings back the stored session `id` and returns its info. A session that
+  is not running is started with its stored `:cwd` and `:model` and its
+  stored messages; one already running is left as it is, keeping its
+  listener.
+
+  Takes the `:provider`, `:tools` and `:listener` options of `start/1`.
+  """
+  @spec resume(id(), keyword()) :: {:ok, Store.session_info()} | {:error, :not_found | term()}
+  def resume(id, opts) do
+    with {:ok, info} <- Store.fetch_session(id) do
+      case start_child(Keyword.merge(opts, id: id, cwd: info.cwd, model: info.model)) do
+        {:ok, _pid} -> {:ok, info}
+        {:error, {:already_started, _pid}} -> {:ok, info}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  @doc "Returns every stored session, most recently updated first."
+  @spec list() :: [Store.session_info()]
+  def list, do: Store.list_sessions()
+
+  defp start_child(opts), do: DynamicSupervisor.start_child(@supervisor, {__MODULE__, opts})
 
   @doc false
   def start_link(opts) do
@@ -104,14 +139,15 @@ defmodule Sadld.Session do
   @impl true
   def init(opts) do
     {provider, provider_opts} = Keyword.fetch!(opts, :provider)
+    id = Keyword.fetch!(opts, :id)
 
     state = %{
-      id: Keyword.fetch!(opts, :id),
+      id: id,
       cwd: Keyword.fetch!(opts, :cwd),
       provider: {provider, Keyword.put(provider_opts, :model, Keyword.fetch!(opts, :model))},
       tools: Keyword.fetch!(opts, :tools),
       listener: Keyword.get(opts, :listener),
-      messages: [],
+      messages: Store.messages(id),
       turn: nil
     }
 
@@ -125,7 +161,7 @@ defmodule Sadld.Session do
 
   def handle_call({:send_message, text}, _from, state) do
     turn_id = new_id()
-    state = %{state | messages: state.messages ++ [%{role: :user, content: text}]}
+    state = append_messages(state, [%{role: :user, content: text}])
     {:reply, {:ok, turn_id}, state, {:continue, {:start_turn, turn_id}}}
   end
 
@@ -180,7 +216,12 @@ defmodule Sadld.Session do
 
   defp handle_turn_event({:step, messages, usage}, state) do
     turn = %{state.turn | usage: add_usage(state.turn.usage, usage)}
-    %{state | messages: state.messages ++ messages, turn: turn}
+    %{append_messages(state, messages) | turn: turn}
+  end
+
+  defp append_messages(state, messages) do
+    :ok = Store.append_messages(state.id, messages)
+    %{state | messages: state.messages ++ messages}
   end
 
   defp fail_turn(state, reason) do

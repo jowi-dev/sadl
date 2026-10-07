@@ -108,7 +108,10 @@ fn transcript_lines(app: &App, width: usize, want: usize) -> (Vec<Line<'static>>
 fn block_lines(block: &Block, width: usize, expand_tools: bool) -> Vec<Line<'static>> {
     match block {
         Block::User(text) => prefixed(text, width, USER_PREFIX, Style::new().bold()),
-        Block::Assistant(text) => wrap(text, width).into_iter().map(Line::from).collect(),
+        Block::Assistant(text) => wrap(text.trim_end_matches('\n'), width)
+            .into_iter()
+            .map(Line::from)
+            .collect(),
         Block::Notice(text) => prefixed(text, width, "· ", Style::new().italic().dim()),
         Block::Tool(tool) if expand_tools => expanded_tool(tool, width),
         Block::Tool(tool) => vec![collapsed_tool(tool, width)],
@@ -365,6 +368,17 @@ mod tests {
         assert_eq!(rows[1], "");
         assert_eq!(rows[2], "Hi there");
         assert!(rows.iter().any(|row| row == "> next"), "{}", screen(&rows));
+    }
+
+    #[test]
+    fn trailing_newlines_do_not_add_blank_lines() {
+        let mut app = opened();
+        notify(&mut app, delta("done\n\n"));
+        app.transcript.push_notice("next");
+
+        let rows = render(&mut app, 30, 8);
+
+        assert_eq!(rows[..3], ["done", "", "· next"]);
     }
 
     #[test]

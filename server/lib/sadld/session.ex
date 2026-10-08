@@ -35,12 +35,21 @@ defmodule Sadld.Session do
   message list from the store when it starts, so one the supervisor
   restarts after a crash, or one brought back by `resume/2`, carries on
   where it left off. A turn that was running when the process died is lost.
+
+  A session's `Sadld.Plugin`s extend it (ADR-0004). Their tools are offered
+  to the model after the session's own, and calls to them run in the
+  plugin. From the turn task, the session passes the system prompt through
+  them before each model call, the prompt when a turn starts (text they add
+  follows it as user messages of its own), and each tool result before the
+  model reads it. They hear `session.created` when a new session starts,
+  `session.status` busy and idle around each turn, `session.idle` after it
+  and `session.error` when it fails.
   """
 
   use GenServer, restart: :transient
 
   alias Sadld.Protocol.Notification
-  alias Sadld.{Permissions, SessionEvents, Store}
+  alias Sadld.{Permissions, Plugin, SessionEvents, Store}
 
   @registry Sadld.SessionRegistry
   @supervisor Sadld.SessionSupervisor
@@ -70,14 +79,15 @@ defmodule Sadld.Session do
     * `:system_prompt` - system prompt passed to the provider as `:system`
       (default `Sadld.SystemPrompt.build/1` of `:cwd`, built once at start
       so later edits to context files reach only new sessions)
+    * `:plugins` - the session's `Sadld.Plugin`s (default none)
   """
   @spec start(keyword()) :: {:ok, id()} | {:error, term()}
   def start(opts) do
     id = new_id()
     session = %{id: id, cwd: Keyword.fetch!(opts, :cwd), model: Keyword.fetch!(opts, :model)}
-    {:ok, _info} = Store.create_session(session)
+    {:ok, info} = Store.create_session(session)
 
-    case start_child(Keyword.put(opts, :id, id)) do
+    case start_child(Keyword.merge(opts, id: id, created: info)) do
       {:ok, _pid} -> {:ok, id}
       {:error, reason} -> {:error, reason}
     end
@@ -88,7 +98,8 @@ defmodule Sadld.Session do
   is not running is started with its stored `:cwd` and `:model` and its
   stored messages; one already running is left as it is.
 
-  Takes the `:provider`, `:tools` and `:permissions` options of `start/1`.
+  Takes the `:provider`, `:tools`, `:permissions` and `:plugins` options of
+  `start/1`.
   """
   @spec resume(id(), keyword()) :: {:ok, Store.session_info()} | {:error, :not_found | term()}
   def resume(id, opts) do
@@ -124,9 +135,16 @@ defmodule Sadld.Session do
   @doc """
   Starts a turn with the user's `text` and returns its turn id. Fails with
   `:busy` while another turn is running.
+
+  Options:
+
+    * `:synthetic` - marks the message as injected rather than typed
+    * `:no_reply` - records the message without starting a turn, even
+      while one runs, and returns `{:ok, nil}`
   """
-  @spec send_message(id(), String.t()) :: {:ok, String.t()} | {:error, :busy | :not_found}
-  def send_message(id, text), do: call(id, {:send_message, text})
+  @spec send_message(id(), String.t(), keyword()) ::
+          {:ok, String.t() | nil} | {:error, :busy | :not_found}
+  def send_message(id, text, opts \\ []), do: call(id, {:send_message, text, opts})
 
   @doc """
   Stops the running turn, which then ends with `stop_reason` `"cancelled"`.
@@ -188,23 +206,38 @@ defmodule Sadld.Session do
       provider: {provider, provider_opts},
       tools: Keyword.fetch!(opts, :tools),
       permissions: Keyword.get_lazy(opts, :permissions, &Permissions.allow_all/0),
+      plugins: Keyword.get(opts, :plugins, []),
       messages: Store.messages(id),
       updated_at: now(),
       turn: nil
     }
 
+    if info = opts[:created] do
+      Plugin.event(state.plugins, "session.created", %{"info" => Plugin.session(info)})
+    end
+
     {:ok, state}
   end
 
   @impl true
-  def handle_call({:send_message, _text}, _from, %{turn: turn} = state) when turn != nil do
-    {:reply, {:error, :busy}, state}
-  end
+  def handle_call({:send_message, text, opts}, _from, state) do
+    message =
+      if opts[:synthetic],
+        do: %{role: :user, content: text, synthetic: true},
+        else: %{role: :user, content: text}
 
-  def handle_call({:send_message, text}, _from, state) do
-    turn_id = new_id()
-    state = append_messages(state, [%{role: :user, content: text}])
-    {:reply, {:ok, turn_id}, state, {:continue, {:start_turn, turn_id}}}
+    cond do
+      opts[:no_reply] ->
+        {:reply, {:ok, nil}, append_messages(state, [message])}
+
+      state.turn != nil ->
+        {:reply, {:error, :busy}, state}
+
+      true ->
+        turn_id = new_id()
+        state = append_messages(state, [message])
+        {:reply, {:ok, turn_id}, state, {:continue, {:start_turn, turn_id, message}}}
+    end
   end
 
   def handle_call(:cancel, _from, %{turn: nil} = state), do: {:reply, :ok, state}
@@ -230,14 +263,20 @@ defmodule Sadld.Session do
   end
 
   @impl true
-  def handle_continue({:start_turn, turn_id}, state) do
+  def handle_continue({:start_turn, turn_id, prompt}, state) do
     session = self()
-    context = Map.take(state, [:cwd, :provider, :tools, :permissions])
+
+    context =
+      state
+      |> Map.take([:id, :cwd, :model, :provider, :tools, :permissions, :plugins])
+      |> Map.put(:turn_id, turn_id)
+
+    status(state, "busy")
 
     task =
       Task.Supervisor.async_nolink(@task_supervisor, fn ->
         report = &send(session, {:turn, turn_id, &1})
-        run_turn(state.messages, Map.put(context, :report, report))
+        run_turn(state.messages, prompt, Map.put(context, :report, report))
       end)
 
     turn = %{id: turn_id, task: task, usage: @zero_usage, asks: MapSet.new()}
@@ -289,13 +328,29 @@ defmodule Sadld.Session do
   defp now, do: DateTime.utc_now(:second)
 
   defp fail_turn(state, reason) do
-    notify(state, "error", %{code: @internal_error, message: inspect(reason)})
+    message = inspect(reason)
+    notify(state, "error", %{code: @internal_error, message: message})
+
+    Plugin.event(state.plugins, "session.error", %{
+      "sessionID" => state.id,
+      "error" => %{"name" => "UnknownError", "data" => %{"message" => message}}
+    })
+
     end_turn(state, "error")
   end
 
   defp end_turn(%{turn: turn} = state, stop_reason) do
     notify(state, "turn.end", %{turn_id: turn.id, stop_reason: stop_reason, usage: turn.usage})
+    status(state, "idle")
+    Plugin.event(state.plugins, "session.idle", %{"sessionID" => state.id})
     %{state | turn: nil}
+  end
+
+  defp status(state, type) do
+    Plugin.event(state.plugins, "session.status", %{
+      "sessionID" => state.id,
+      "status" => %{"type" => type}
+    })
   end
 
   defp notify(state, method, params) do
@@ -312,10 +367,40 @@ defmodule Sadld.Session do
 
   # The turn loop, run inside the turn task. `context.report` sends an
   # event to the session. Returns `:completed` or `{:error, reason}`.
-  defp run_turn(messages, %{provider: {provider, provider_opts}, report: report} = context) do
+  defp run_turn(messages, prompt, %{provider: {_provider, provider_opts}} = context) do
+    builtin = Keyword.get(provider_opts, :tools, [])
+    plugin_tools = Plugin.tools(context.plugins, Enum.map(builtin, & &1.name))
+
+    context =
+      Map.put(context, :plugin_tools, Map.new(plugin_tools, fn {spec, p} -> {spec.name, p} end))
+
+    context =
+      if plugin_tools == [],
+        do: context,
+        else: put_provider_opt(context, :tools, builtin ++ Enum.map(plugin_tools, &elem(&1, 0)))
+
+    case chat_message(prompt, context) do
+      [] ->
+        run_steps(messages, context)
+
+      added ->
+        context.report.({:step, added, @zero_usage})
+        run_steps(messages ++ added, context)
+    end
+  end
+
+  defp put_provider_opt(%{provider: {provider, opts}} = context, key, value),
+    do: %{context | provider: {provider, Keyword.put(opts, key, value)}}
+
+  defp run_steps(messages, %{provider: {provider, provider_opts}, report: report} = context) do
     on_text = &report.({:notify, "turn.delta", %{text: &1}})
 
-    case provider.chat(messages, Keyword.put(provider_opts, :on_text, on_text)) do
+    opts =
+      provider_opts
+      |> Keyword.put(:on_text, on_text)
+      |> put_system(system(provider_opts[:system], context))
+
+    case provider.chat(messages, opts) do
       {:ok, %{text: text, tool_calls: tool_calls, usage: usage}} ->
         results = Enum.map(tool_calls, &run_tool(&1, context))
         step = [%{role: :assistant, content: text, tool_calls: tool_calls} | results]
@@ -323,30 +408,115 @@ defmodule Sadld.Session do
 
         if tool_calls == [],
           do: :completed,
-          else: run_turn(messages ++ step, context)
+          else: run_steps(messages ++ step, context)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp run_tool(call, %{tools: {tools, tools_opts}, report: report} = context) do
+  defp put_system(opts, nil), do: Keyword.delete(opts, :system)
+  defp put_system(opts, system), do: Keyword.put(opts, :system, system)
+
+  defp system(base, %{plugins: []}), do: base
+
+  defp system(base, context) do
+    input = %{"sessionID" => context.id, "model" => %{"id" => context.model}}
+
+    output =
+      Plugin.hook(context.plugins, "experimental.chat.system.transform", input, %{
+        "system" => List.wrap(base)
+      })
+
+    case output do
+      %{"system" => [_ | _] = parts} -> Enum.join(parts, "\n\n")
+      _empty -> nil
+    end
+  end
+
+  # The user messages that plugins append to the turn's prompt.
+  defp chat_message(_prompt, %{plugins: []}), do: []
+
+  defp chat_message(prompt, %{id: id, turn_id: turn_id} = context) do
+    part =
+      %{"id" => turn_id <> "_0", "sessionID" => id, "messageID" => turn_id, "type" => "text"}
+      |> Map.put("text", prompt.content)
+      |> then(&if prompt[:synthetic], do: Map.put(&1, "synthetic", true), else: &1)
+
+    input = %{"sessionID" => id, "messageID" => turn_id}
+
+    output = %{
+      "message" => %{"id" => turn_id, "sessionID" => id, "role" => "user"},
+      "parts" => [part]
+    }
+
+    context.plugins
+    |> Plugin.hook("chat.message", input, output)
+    |> Map.get("parts", [])
+    |> Enum.drop(1)
+    |> Enum.flat_map(fn
+      %{"type" => "text", "text" => text, "synthetic" => true} when is_binary(text) ->
+        [%{role: :user, content: text, synthetic: true}]
+
+      %{"type" => "text", "text" => text} when is_binary(text) ->
+        [%{role: :user, content: text}]
+
+      _other ->
+        []
+    end)
+  end
+
+  defp run_tool(call, %{report: report} = context) do
     report.({:notify, "tool.call", %{call_id: call.id, name: call.name, args: call.args}})
 
     result =
       case permission(call, context) do
-        :allow -> tools.run(call, context.cwd, tools_opts)
+        :allow -> execute(call, context)
         {:deny, by} -> {:error, "permission denied by " <> by}
       end
 
     {output, is_error} =
       case result do
-        {:ok, output} -> {output, false}
-        {:error, output} -> {output, true}
+        {:ok, output} -> {after_tool(call, output, context), false}
+        {:error, output} -> {after_tool(call, output, context), true}
       end
 
     report.({:notify, "tool.result", %{call_id: call.id, output: output, is_error: is_error}})
     %{role: :tool, call_id: call.id, content: output, is_error: is_error}
+  end
+
+  defp execute(call, %{tools: {tools, tools_opts}} = context) do
+    case Map.fetch(context.plugin_tools, call.name) do
+      {:ok, {plugin, ref}} ->
+        plugin.run_tool(ref, call, %{
+          session_id: context.id,
+          turn_id: context.turn_id,
+          cwd: context.cwd
+        })
+
+      :error ->
+        tools.run(call, context.cwd, tools_opts)
+    end
+  end
+
+  defp after_tool(_call, output, %{plugins: []}), do: output
+
+  defp after_tool(call, output, context) do
+    input = %{
+      "tool" => call.name,
+      "sessionID" => context.id,
+      "callID" => call.id,
+      "args" => call.args
+    }
+
+    case Plugin.hook(context.plugins, "tool.execute.after", input, %{
+           "title" => call.name,
+           "output" => output,
+           "metadata" => %{}
+         }) do
+      %{"output" => output} when is_binary(output) -> output
+      _other -> output
+    end
   end
 
   # Asking reports the call to the session, which broadcasts the request

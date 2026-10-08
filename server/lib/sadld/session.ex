@@ -13,10 +13,17 @@ defmodule Sadld.Session do
   Progress is broadcast on the session's `Sadld.SessionEvents` topic, so
   every subscriber receives
   `{:session_event, session_id, %Sadld.Protocol.Notification{}}` messages:
-  the `turn.delta`, `tool.call`, `tool.result`, `turn.end` and `error`
-  notifications of `docs/protocol.md`, in order. All of them are sent by
-  the session process, so a subscriber that also made the `send_message/2`
-  call gets the reply before the turn's first notification.
+  the `turn.delta`, `tool.call`, `permission.request`, `tool.result`,
+  `turn.end` and `error` notifications of `docs/protocol.md`, in order. All
+  of them are sent by the session process, so a subscriber that also made
+  the `send_message/2` call gets the reply before the turn's first
+  notification.
+
+  Each tool call is checked against the session's `Sadld.Permissions`
+  policy before it runs. A denied call fails with an error result the model
+  reads. A call the policy asks about is broadcast as `permission.request`
+  and waits, with the rest of the turn, until `permit/3` answers it or the
+  turn is cancelled.
 
   A turn appends to the message list only at consistent points: the user
   message when it starts, then each assistant reply together with the
@@ -33,7 +40,7 @@ defmodule Sadld.Session do
   use GenServer, restart: :transient
 
   alias Sadld.Protocol.Notification
-  alias Sadld.{SessionEvents, Store}
+  alias Sadld.{Permissions, SessionEvents, Store}
 
   @registry Sadld.SessionRegistry
   @supervisor Sadld.SessionSupervisor
@@ -58,6 +65,8 @@ defmodule Sadld.Session do
     * `:model` (required) - model name, passed to the provider as `:model`
     * `:provider` (required) - `{module, opts}` for a `Sadld.Provider`
     * `:tools` (required) - `{module, opts}` for a `Sadld.ToolRunner`
+    * `:permissions` - the `Sadld.Permissions` policy that decides which tool
+      calls run (default `Sadld.Permissions.allow_all/0`)
     * `:system_prompt` - system prompt passed to the provider as `:system`
       (default `Sadld.SystemPrompt.build/1` of `:cwd`, built once at start
       so later edits to context files reach only new sessions)
@@ -79,7 +88,7 @@ defmodule Sadld.Session do
   is not running is started with its stored `:cwd` and `:model` and its
   stored messages; one already running is left as it is.
 
-  Takes the `:provider` and `:tools` options of `start/1`.
+  Takes the `:provider`, `:tools` and `:permissions` options of `start/1`.
   """
   @spec resume(id(), keyword()) :: {:ok, Store.session_info()} | {:error, :not_found | term()}
   def resume(id, opts) do
@@ -126,6 +135,16 @@ defmodule Sadld.Session do
   @spec cancel(id()) :: :ok | {:error, :not_found}
   def cancel(id), do: call(id, :cancel)
 
+  @doc """
+  Answers the permission request for tool call `call_id`: `:allow` runs
+  the tool, `:deny` fails it without running. Fails with `:not_pending`
+  when that call is not waiting for an answer, which includes one already
+  answered.
+  """
+  @spec permit(id(), String.t(), :allow | :deny) :: :ok | {:error, :not_pending | :not_found}
+  def permit(id, call_id, decision) when decision in [:allow, :deny],
+    do: call(id, {:permit, call_id, decision})
+
   @doc "Returns the session's message list, oldest first."
   @spec messages(id()) :: [Sadld.Provider.message()] | {:error, :not_found}
   def messages(id), do: call(id, :messages)
@@ -168,6 +187,7 @@ defmodule Sadld.Session do
       model: model,
       provider: {provider, provider_opts},
       tools: Keyword.fetch!(opts, :tools),
+      permissions: Keyword.get_lazy(opts, :permissions, &Permissions.allow_all/0),
       messages: Store.messages(id),
       updated_at: now(),
       turn: nil
@@ -194,6 +214,15 @@ defmodule Sadld.Session do
     {:reply, :ok, end_turn(state, "cancelled")}
   end
 
+  def handle_call({:permit, call_id, decision}, _from, %{turn: turn} = state) do
+    if turn != nil and MapSet.member?(turn.asks, call_id) do
+      send(turn.task.pid, {:permit, call_id, decision})
+      {:reply, :ok, %{state | turn: %{turn | asks: MapSet.delete(turn.asks, call_id)}}}
+    else
+      {:reply, {:error, :not_pending}, state}
+    end
+  end
+
   def handle_call(:messages, _from, state), do: {:reply, state.messages, state}
 
   def handle_call(:info, _from, state) do
@@ -203,15 +232,16 @@ defmodule Sadld.Session do
   @impl true
   def handle_continue({:start_turn, turn_id}, state) do
     session = self()
-    %{cwd: cwd, provider: provider, tools: tools, messages: messages} = state
+    context = Map.take(state, [:cwd, :provider, :tools, :permissions])
 
     task =
       Task.Supervisor.async_nolink(@task_supervisor, fn ->
         report = &send(session, {:turn, turn_id, &1})
-        run_turn(messages, provider, tools, cwd, report)
+        run_turn(state.messages, Map.put(context, :report, report))
       end)
 
-    {:noreply, %{state | turn: %{id: turn_id, task: task, usage: @zero_usage}}}
+    turn = %{id: turn_id, task: task, usage: @zero_usage, asks: MapSet.new()}
+    {:noreply, %{state | turn: turn}}
   end
 
   @impl true
@@ -237,6 +267,12 @@ defmodule Sadld.Session do
 
   defp handle_turn_event({:notify, method, params}, state) do
     notify(state, method, Map.put(params, :turn_id, state.turn.id))
+    state
+  end
+
+  defp handle_turn_event({:ask, call_id}, %{turn: turn} = state) do
+    state = %{state | turn: %{turn | asks: MapSet.put(turn.asks, call_id)}}
+    notify(state, "permission.request", %{turn_id: turn.id, call_id: call_id})
     state
   end
 
@@ -274,36 +310,62 @@ defmodule Sadld.Session do
     }
   end
 
-  # The turn loop, run inside the turn task. `report` sends an event to the
-  # session. Returns `:completed` or `{:error, reason}`.
-  defp run_turn(messages, {provider, provider_opts} = p, tools, cwd, report) do
+  # The turn loop, run inside the turn task. `context.report` sends an
+  # event to the session. Returns `:completed` or `{:error, reason}`.
+  defp run_turn(messages, %{provider: {provider, provider_opts}, report: report} = context) do
     on_text = &report.({:notify, "turn.delta", %{text: &1}})
 
     case provider.chat(messages, Keyword.put(provider_opts, :on_text, on_text)) do
       {:ok, %{text: text, tool_calls: tool_calls, usage: usage}} ->
-        results = Enum.map(tool_calls, &run_tool(&1, tools, cwd, report))
+        results = Enum.map(tool_calls, &run_tool(&1, context))
         step = [%{role: :assistant, content: text, tool_calls: tool_calls} | results]
         report.({:step, step, usage})
 
         if tool_calls == [],
           do: :completed,
-          else: run_turn(messages ++ step, p, tools, cwd, report)
+          else: run_turn(messages ++ step, context)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp run_tool(call, {tools, tools_opts}, cwd, report) do
+  defp run_tool(call, %{tools: {tools, tools_opts}, report: report} = context) do
     report.({:notify, "tool.call", %{call_id: call.id, name: call.name, args: call.args}})
 
+    result =
+      case permission(call, context) do
+        :allow -> tools.run(call, context.cwd, tools_opts)
+        {:deny, by} -> {:error, "permission denied by " <> by}
+      end
+
     {output, is_error} =
-      case tools.run(call, cwd, tools_opts) do
+      case result do
         {:ok, output} -> {output, false}
         {:error, output} -> {output, true}
       end
 
     report.({:notify, "tool.result", %{call_id: call.id, output: output, is_error: is_error}})
     %{role: :tool, call_id: call.id, content: output, is_error: is_error}
+  end
+
+  # Asking reports the call to the session, which broadcasts the request
+  # and forwards the first client's answer here.
+  defp permission(%{id: call_id} = call, %{permissions: permissions, report: report}) do
+    case Permissions.check(permissions, call) do
+      :allow ->
+        :allow
+
+      :deny ->
+        {:deny, "policy"}
+
+      :ask ->
+        report.({:ask, call_id})
+
+        receive do
+          {:permit, ^call_id, :allow} -> :allow
+          {:permit, ^call_id, :deny} -> {:deny, "the user"}
+        end
+    end
   end
 end

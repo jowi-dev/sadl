@@ -79,7 +79,8 @@ defmodule Sadld.Session do
     * `:system_prompt` - system prompt passed to the provider as `:system`
       (default `Sadld.SystemPrompt.build/1` of `:cwd`, built once at start
       so later edits to context files reach only new sessions)
-    * `:plugins` - the session's `Sadld.Plugin`s (default none)
+    * `:plugins` - the session's `Sadld.Plugin`s (default
+      `Sadld.Plugins.for_cwd/1` of `:cwd`)
   """
   @spec start(keyword()) :: {:ok, id()} | {:error, term()}
   def start(opts) do
@@ -214,7 +215,7 @@ defmodule Sadld.Session do
       provider: {provider, provider_opts},
       tools: Keyword.fetch!(opts, :tools),
       permissions: Keyword.get_lazy(opts, :permissions, &Permissions.allow_all/0),
-      plugins: Keyword.get(opts, :plugins, []),
+      plugins: Keyword.get_lazy(opts, :plugins, fn -> Sadld.Plugins.for_cwd(cwd) end),
       messages: Store.messages(id),
       updated_at: now(),
       turn: nil

@@ -1,4 +1,5 @@
-//! Drawing the app: the transcript, the prompt editor and a status line.
+//! Drawing the app: the transcript, the prompt editor (or a permission
+//! prompt while a tool call waits for one) and a status line.
 //!
 //! The transcript is virtualized: blocks are wrapped newest first and only
 //! until the visible window (plus the scroll offset) is filled, so drawing
@@ -27,7 +28,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let input_width = usize::from(area.width).saturating_sub(INPUT_PREFIX.len());
     let input = app.input.layout(input_width);
-    let input_rows = input.lines.len().clamp(1, MAX_INPUT_ROWS);
+    let input_rows = if app.asking.is_some() {
+        1
+    } else {
+        input.lines.len().clamp(1, MAX_INPUT_ROWS)
+    };
     let [transcript, rule, prompt, status] = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(1),
@@ -42,25 +47,53 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         rule,
     );
 
-    let offset = (input.cursor_row + 1).saturating_sub(input_rows);
-    let lines: Vec<Line> = input
-        .lines
-        .into_iter()
-        .enumerate()
-        .skip(offset)
-        .take(input_rows)
-        .map(|(row, text)| {
-            let prefix = if row == 0 { INPUT_PREFIX } else { INDENT };
-            Line::from(vec![Span::raw(prefix).bold(), Span::raw(text)])
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), prompt);
-    frame.set_cursor_position((
-        prompt.x + (INPUT_PREFIX.len() + input.cursor_col) as u16,
-        prompt.y + (input.cursor_row - offset) as u16,
-    ));
+    if let Some(call_id) = &app.asking {
+        let line = permission_prompt(app, call_id, usize::from(prompt.width));
+        frame.render_widget(Paragraph::new(line), prompt);
+    } else {
+        let offset = (input.cursor_row + 1).saturating_sub(input_rows);
+        let lines: Vec<Line> = input
+            .lines
+            .into_iter()
+            .enumerate()
+            .skip(offset)
+            .take(input_rows)
+            .map(|(row, text)| {
+                let prefix = if row == 0 { INPUT_PREFIX } else { INDENT };
+                Line::from(vec![Span::raw(prefix).bold(), Span::raw(text)])
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines), prompt);
+        frame.set_cursor_position((
+            prompt.x + (INPUT_PREFIX.len() + input.cursor_col) as u16,
+            prompt.y + (input.cursor_row - offset) as u16,
+        ));
+    }
 
     frame.render_widget(status_line(app, usize::from(status.width)), status);
+}
+
+/// Asks whether tool call `call_id` may run, naming it as its block does.
+fn permission_prompt(app: &App, call_id: &str, width: usize) -> Line<'static> {
+    const KEYS: &str = "  y / n";
+    let tool = app.transcript.blocks().rev().find_map(|block| match block {
+        Block::Tool(tool) if tool.call_id == call_id => Some(tool),
+        _ => None,
+    });
+    let call = match tool {
+        Some(tool) => format!("{} {}", tool.name, tool.args),
+        None => "this tool call".to_string(),
+    };
+    let call = clip(
+        &call,
+        width.saturating_sub(columns("? allow ") + columns(KEYS)),
+    );
+    Line::from(vec![
+        Span::raw("? ").bold(),
+        Span::raw("allow "),
+        Span::raw(call).bold(),
+        Span::raw(KEYS).dim(),
+    ])
 }
 
 fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -220,6 +253,9 @@ fn status_line(app: &App, width: usize) -> Line<'static> {
     };
     let mut right = match (&app.session, app.running) {
         (None, _) => String::new(),
+        (Some(_), _) if app.asking.is_some() => {
+            "waiting for permission (Esc to cancel)".to_string()
+        }
         (Some(_), true) => "running (Esc to cancel)".to_string(),
         (Some(_), false) => "idle".to_string(),
     };
@@ -241,8 +277,8 @@ fn status_line(app: &App, width: usize) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::protocol::{
-        Event, JsonRpc, Notification, Outcome, Response, ServerMessage, StopReason, ToolCall,
-        ToolResult, TurnDelta, TurnEnd, Usage,
+        Event, JsonRpc, Notification, Outcome, PermissionRequest, Response, ServerMessage,
+        StopReason, ToolCall, ToolResult, TurnDelta, TurnEnd, Usage,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
@@ -444,6 +480,62 @@ mod tests {
             }),
         );
         app
+    }
+
+    /// A running turn whose bash call `c_1` waits for permission.
+    fn asking_session() -> App {
+        let mut app = opened();
+        type_text(&mut app, "draft");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let mut args = Map::new();
+        args.insert("command".into(), json!("rm -rf build"));
+        notify(
+            &mut app,
+            Event::ToolCall(ToolCall {
+                session_id: "s_1".into(),
+                turn_id: "t_1".into(),
+                call_id: "c_1".into(),
+                name: "bash".into(),
+                args,
+            }),
+        );
+        notify(
+            &mut app,
+            Event::PermissionRequest(PermissionRequest {
+                session_id: "s_1".into(),
+                turn_id: "t_1".into(),
+                call_id: "c_1".into(),
+            }),
+        );
+        app
+    }
+
+    #[test]
+    fn a_permission_request_replaces_the_input_with_a_prompt() {
+        let mut app = asking_session();
+
+        let rows = render(&mut app, 60, 8);
+
+        assert_eq!(
+            rows[rows.len() - 2],
+            r#"? allow bash {"command":"rm -rf build"}  y / n"#
+        );
+        assert!(
+            rows.last()
+                .unwrap()
+                .contains("waiting for permission (Esc to cancel)")
+        );
+    }
+
+    #[test]
+    fn a_long_permission_prompt_is_clipped_to_the_width() {
+        let mut app = asking_session();
+
+        let rows = render(&mut app, 30, 8);
+
+        let prompt = &rows[rows.len() - 2];
+        assert!(prompt.ends_with("  y / n"), "{prompt}");
+        assert!(prompt.contains("…"), "{prompt}");
     }
 
     #[test]

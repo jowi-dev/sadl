@@ -7,6 +7,11 @@ defmodule Sadld.Store do
   in order, tool calls and tool results included, so a session can be
   rebuilt after its process or the whole server restarts.
 
+  Compaction never rewrites messages. Each compaction is a row of its own
+  holding a summary and `first_kept`, the seq (zero-based position) of the
+  first message it keeps verbatim; the summary stands in for every message
+  before that one.
+
   Calls that fail to write crash the store rather than return an error, so
   a caller never acknowledges data that was not persisted.
 
@@ -48,6 +53,14 @@ defmodule Sadld.Store do
       role TEXT NOT NULL,
       data TEXT NOT NULL,
       PRIMARY KEY (session_id, seq)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS compactions (
+      session_id TEXT NOT NULL REFERENCES sessions (id),
+      first_kept INTEGER NOT NULL,
+      summary TEXT NOT NULL,
+      created_at TEXT NOT NULL
     )
     """
   ]
@@ -104,6 +117,19 @@ defmodule Sadld.Store do
   @doc "Returns session `id`'s messages, oldest first; `[]` for an unknown id."
   @spec messages(GenServer.server(), String.t()) :: [Sadld.Provider.message()]
   def messages(store \\ __MODULE__, id), do: GenServer.call(store, {:messages, id})
+
+  @typedoc "A summary standing in for every message before seq `first_kept`."
+  @type compaction :: %{summary: String.t(), first_kept: non_neg_integer()}
+
+  @doc "Records a compaction of session `id`. Returns once it is on disk."
+  @spec add_compaction(GenServer.server(), String.t(), compaction()) :: :ok
+  def add_compaction(store \\ __MODULE__, id, compaction),
+    do: GenServer.call(store, {:add_compaction, id, compaction})
+
+  @doc "Returns session `id`'s latest compaction, or `nil` if it has none."
+  @spec latest_compaction(GenServer.server(), String.t()) :: compaction() | nil
+  def latest_compaction(store \\ __MODULE__, id),
+    do: GenServer.call(store, {:latest_compaction, id})
 
   @impl true
   def init(opts) do
@@ -190,6 +216,31 @@ defmodule Sadld.Store do
       ])
 
     {:reply, Enum.map(rows, fn [role, data] -> decode_message(role, data) end), state}
+  end
+
+  def handle_call({:add_compaction, id, compaction}, _from, state) do
+    {now, state} = timestamp(state)
+
+    query(state.conn, "INSERT INTO compactions VALUES (?1, ?2, ?3, ?4)", [
+      id,
+      compaction.first_kept,
+      compaction.summary,
+      now
+    ])
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:latest_compaction, id}, _from, state) do
+    sql = """
+    SELECT summary, first_kept FROM compactions WHERE session_id = ?1
+    ORDER BY rowid DESC LIMIT 1
+    """
+
+    case query(state.conn, sql, [id]) do
+      [[summary, first_kept]] -> {:reply, %{summary: summary, first_kept: first_kept}, state}
+      [] -> {:reply, nil, state}
+    end
   end
 
   # Runs one statement and returns its rows; crashes on any failure.

@@ -68,4 +68,28 @@ defmodule Sadld.StoreTest do
     assert {:ok, %{id: "s_1"}} = Store.fetch_session(store, "s_1")
     assert Store.messages(store, "s_1") == [%{role: :user, content: "hi"}]
   end
+
+  test "compactions record a summary and the first message kept", %{store: store} do
+    create(store, "s_1")
+    assert Store.latest_compaction(store, "s_1") == nil
+
+    assert Store.add_compaction(store, "s_1", %{summary: "one", first_kept: 2}) == :ok
+    assert Store.add_compaction(store, "s_1", %{summary: "two", first_kept: 5}) == :ok
+
+    assert Store.latest_compaction(store, "s_1") == %{summary: "two", first_kept: 5}
+    assert Store.latest_compaction(store, "missing") == nil
+  end
+
+  test "compactions leave the stored messages untouched", %{store: store, path: path} do
+    create(store, "s_1")
+    messages = [%{role: :user, content: "hi"}, %{role: :assistant, content: "yo", tool_calls: []}]
+    :ok = Store.append_messages(store, "s_1", messages)
+    :ok = Store.add_compaction(store, "s_1", %{summary: "said hi", first_kept: 2})
+    stop_supervised!(Store)
+
+    store = start_supervised!({Store, path: path, name: nil})
+
+    assert Store.messages(store, "s_1") == messages
+    assert Store.latest_compaction(store, "s_1") == %{summary: "said hi", first_kept: 2}
+  end
 end

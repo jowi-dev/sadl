@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "id": 5, "method": "session.promptAsync", "params": {"path": {"id": "s_1"}, "body": {"parts": [{"type": "text", "text": "[thatch] 1 unread chat message.", "synthetic": true}]}}}

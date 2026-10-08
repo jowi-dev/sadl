@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "id": 0, "method": "init", "params": {"plugin": "/nix/store/x-thatch/libexec/thatch/src/index.ts", "worktree": "/home/u/proj"}}

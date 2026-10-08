@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "id": 2, "method": "hook", "params": {"name": "experimental.chat.system.transform", "input": {"sessionID": "s_1", "model": {"id": "glm-4.7-flash"}}, "output": {"system": ["You are sadl."]}}}

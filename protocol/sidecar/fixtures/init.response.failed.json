@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "id": 0, "error": {"code": -32021, "message": "Cannot find module \"/nope.ts\""}}

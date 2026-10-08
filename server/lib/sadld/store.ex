@@ -4,8 +4,9 @@ defmodule Sadld.Store do
 
   One process owns the database connection, so writes are serialized. Each
   session row holds its id, cwd, model and timestamps; its messages are kept
-  in order, tool calls and tool results included, so a session can be
-  rebuilt after its process or the whole server restarts.
+  in order, tool calls, tool results and the `synthetic` mark of injected
+  user messages included, so a session can be rebuilt after its process or
+  the whole server restarts.
 
   Calls that fail to write crash the store rather than return an error, so
   a caller never acknowledges data that was not persisted.
@@ -221,8 +222,8 @@ defmodule Sadld.Store do
   defp session_info([id, cwd, model, updated_at]),
     do: %{id: id, cwd: cwd, model: model, updated_at: updated_at}
 
-  defp encode_message(%{role: :user, content: content}),
-    do: {"user", JSON.encode!(%{content: content})}
+  defp encode_message(%{role: :user} = message),
+    do: {"user", JSON.encode!(Map.take(message, [:content, :synthetic]))}
 
   defp encode_message(%{role: :assistant, content: content, tool_calls: tool_calls}),
     do: {"assistant", JSON.encode!(%{content: content, tool_calls: tool_calls})}
@@ -231,8 +232,13 @@ defmodule Sadld.Store do
     do: {"tool", JSON.encode!(Map.take(message, [:call_id, :content, :is_error]))}
 
   defp decode_message("user", data) do
-    %{"content" => content} = JSON.decode!(data)
-    %{role: :user, content: content}
+    case JSON.decode!(data) do
+      %{"content" => content, "synthetic" => true} ->
+        %{role: :user, content: content, synthetic: true}
+
+      %{"content" => content} ->
+        %{role: :user, content: content}
+    end
   end
 
   defp decode_message("assistant", data) do

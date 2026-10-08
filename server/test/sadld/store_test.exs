@@ -47,6 +47,15 @@ defmodule Sadld.StoreTest do
     assert Store.messages(store, "missing") == []
   end
 
+  test "a synthetic user message keeps its mark", %{store: store} do
+    create(store, "s_1")
+    messages = [%{role: :user, content: "hi"}, %{role: :user, content: "note", synthetic: true}]
+
+    :ok = Store.append_messages(store, "s_1", messages)
+
+    assert Store.messages(store, "s_1") == messages
+  end
+
   test "list_sessions puts the most recently updated first", %{store: store} do
     create(store, "s_1")
     create(store, "s_2")

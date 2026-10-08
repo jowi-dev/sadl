@@ -68,6 +68,20 @@ defmodule Sadld.ListenerTest do
   defp cancel_request(request_id, id),
     do: %{fixture("session.cancel.request.json") | "id" => request_id, "params" => %{"id" => id}}
 
+  defp permit_request(request_id, id, decision),
+    do: %{
+      fixture("session.permit.request.json")
+      | "id" => request_id,
+        "params" => %{"id" => id, "call_id" => "c_1", "decision" => decision}
+    }
+
+  # Writes a permission policy next to the socket and returns its path.
+  defp write_policy(socket_path, json) do
+    path = Path.join(Path.dirname(socket_path), "permissions.json")
+    File.write!(path, json)
+    path
+  end
+
   # Reads notifications up to and including the next turn.end.
   defp receive_turn(socket, acc \\ []) do
     message = receive_message(socket)
@@ -170,10 +184,18 @@ defmodule Sadld.ListenerTest do
 
   describe "with sessions" do
     # The stub model echoes the user's text, except "wait", which blocks
-    # until the turn is cancelled.
+    # until the turn is cancelled, and "bash", which calls bash once and
+    # echoes its result. The permission policy asks about every bash call.
     setup %{path: path} do
       respond = fn messages ->
         case List.last(messages) do
+          %{role: :tool, content: output} ->
+            {:ok, %{text: "tool: " <> output, tool_calls: [], usage: @usage}}
+
+          %{content: "bash"} ->
+            call = %{id: "c_1", name: "bash", args: %{"command" => "ls"}}
+            {:ok, %{text: "", tool_calls: [call], usage: @usage}}
+
           %{content: "wait"} ->
             receive do
               :never -> :ok
@@ -186,8 +208,13 @@ defmodule Sadld.ListenerTest do
 
       session = [
         provider: {StubProvider, respond: respond},
-        tools: {StubTools, run: fn _call, _cwd -> {:ok, ""} end},
-        model: "stub-default"
+        tools: {StubTools, run: fn _call, _cwd -> {:ok, "listing"} end},
+        model: "stub-default",
+        permissions_path:
+          write_policy(
+            path,
+            ~s({"default": "allow", "rules": [{"tool": "bash", "action": "ask"}]})
+          )
       ]
 
       {:ok, _pid} = start_listener(path, session: session)
@@ -290,6 +317,75 @@ defmodule Sadld.ListenerTest do
       assert turn_end["turn_id"] == turn_id
       assert turn_end["stop_reason"] == "cancelled"
     end
+
+    test "a tool call the policy asks about waits for session.permit", %{socket: socket} do
+      handshake(socket)
+      id = open(socket)
+
+      %{"result" => %{"turn_id" => turn_id}} = request(socket, send_request(3, id, "bash"))
+
+      assert %{"method" => "tool.call"} = receive_message(socket)
+
+      assert receive_message(socket) == %{
+               "jsonrpc" => "2.0",
+               "method" => "permission.request",
+               "params" => %{"session_id" => id, "turn_id" => turn_id, "call_id" => "c_1"}
+             }
+
+      assert {:error, :timeout} = :gen_tcp.recv(socket, 0, 50)
+
+      assert request(socket, permit_request(4, id, "allow")) == %{
+               "jsonrpc" => "2.0",
+               "id" => 4,
+               "result" => %{}
+             }
+
+      assert [
+               %{"method" => "tool.result", "params" => %{"output" => "listing"}},
+               %{"method" => "turn.delta", "params" => %{"text" => "tool: listing"}},
+               %{"method" => "turn.end"}
+             ] = receive_turn(socket)
+
+      assert request(socket, permit_request(5, id, "deny")) ==
+               %{fixture("session.permit.response.not-pending.json") | "id" => 5}
+    end
+
+    test "a denied tool call reports the denial to the model", %{socket: socket} do
+      handshake(socket)
+      id = open(socket)
+
+      %{"result" => _} = request(socket, send_request(3, id, "bash"))
+      assert %{"method" => "tool.call"} = receive_message(socket)
+      assert %{"method" => "permission.request"} = receive_message(socket)
+
+      %{"result" => %{}} = request(socket, permit_request(4, id, "deny"))
+
+      assert [
+               %{"method" => "tool.result", "params" => %{"is_error" => true} = result},
+               %{"method" => "turn.delta"},
+               %{"method" => "turn.end"}
+             ] = receive_turn(socket)
+
+      assert result["output"] == "permission denied by the user"
+    end
+
+    test "permit on an unknown session answers session not found", %{socket: socket} do
+      handshake(socket)
+
+      assert error_code(request(socket, fixture("session.permit.request.json"))) == -32_002
+    end
+  end
+
+  test "an invalid permission policy fails session.open", %{path: path} do
+    policy = write_policy(path, ~s({"default": "sometimes"}))
+    {:ok, _pid} = start_listener(path, session: [permissions_path: policy])
+    socket = connect(path)
+    handshake(socket)
+
+    response = request(socket, fixture("session.open.request.json"))
+
+    assert error_code(response) == -32_603
+    assert response["error"]["message"] =~ policy
   end
 
   test "rejects an overlong line and keeps the connection usable", %{path: path} do

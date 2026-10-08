@@ -11,14 +11,15 @@ defmodule Sadld.Connection do
   a running one; both subscribe the connection to the session's
   `Sadld.SessionEvents` topic, and every notification on it is written to
   the socket. Several connections can attach to one session and each sees
-  the whole stream. `session.send` and `session.cancel` work on any running
-  session. Resuming a session that is not running, and `session.list`, wait
+  the whole stream. A new session gets the permission policy in its
+  `:permissions_path` file. `session.send`, `session.cancel` and
+  `session.permit` work on any running session. Resuming a session that is not running, and `session.list`, wait
   on persistence and answer with session not found and an internal error.
   """
 
   use GenServer, restart: :temporary
 
-  alias Sadld.{Protocol, Session, SessionEvents}
+  alias Sadld.{Permissions, Protocol, Session, SessionEvents}
   alias Sadld.Protocol.{Notification, Request, Response}
   alias Sadld.Provider.OpenAI
 
@@ -31,6 +32,7 @@ defmodule Sadld.Connection do
   @handshake_required -32_001
   @session_not_found -32_002
   @session_busy -32_003
+  @not_pending -32_004
 
   @doc """
   Starts a connection for an accepted socket. The caller must make the new
@@ -40,9 +42,12 @@ defmodule Sadld.Connection do
 
     * `:socket` (required) - the accepted client socket
     * `:session` - how `session.open` starts sessions, as `:provider` and
-      `:tools` for `Sadld.Session.start/1` and `:model`, the model used when
-      the request names none. Missing keys default to the OpenAI provider
-      offered `Sadld.Tools`, and the provider's configured model.
+      `:tools` for `Sadld.Session.start/1`, `:model`, the model used when
+      the request names none, and `:permissions_path`, the
+      `Sadld.Permissions` policy file read for each new session. Missing
+      keys default to the OpenAI provider offered `Sadld.Tools`, the
+      provider's configured model, and the `:sadld` `:permissions_path`
+      setting or `Sadld.Permissions.default_path/0`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -69,7 +74,9 @@ defmodule Sadld.Connection do
     [
       provider: {OpenAI, tools: Sadld.Tools.specs()},
       tools: {Sadld.Tools, []},
-      model: Keyword.get(config, :model, OpenAI.default_model())
+      model: Keyword.get(config, :model, OpenAI.default_model()),
+      permissions_path:
+        Application.get_env(:sadld, :permissions_path) || Permissions.default_path()
     ]
   end
 
@@ -166,15 +173,18 @@ defmodule Sadld.Connection do
     do: {error(id, @handshake_required, "handshake required"), state}
 
   defp dispatch(%Request{method: "session.open", id: id, params: params} = request, state) do
-    opts = [
-      cwd: params.cwd,
-      model: Map.get(params, :model, state.session[:model]),
-      provider: state.session[:provider],
-      tools: state.session[:tools]
-    ]
-
-    case Session.start(opts) do
-      {:ok, session_id} -> {attach(request, session_id), state}
+    with {:ok, permissions} <- Permissions.load(state.session[:permissions_path]),
+         opts = [
+           cwd: params.cwd,
+           model: Map.get(params, :model, state.session[:model]),
+           provider: state.session[:provider],
+           tools: state.session[:tools],
+           permissions: permissions
+         ],
+         {:ok, session_id} <- Session.start(opts) do
+      {attach(request, session_id), state}
+    else
+      {:error, message} when is_binary(message) -> {error(id, @internal_error, message), state}
       {:error, reason} -> {error(id, @internal_error, inspect(reason)), state}
     end
   end
@@ -192,6 +202,15 @@ defmodule Sadld.Connection do
   defp dispatch(%Request{method: "session.cancel", id: id, params: params}, state) do
     case Session.cancel(params.id) do
       :ok -> {result(id, "session.cancel", %{}), state}
+      {:error, reason} -> {session_error(id, reason), state}
+    end
+  end
+
+  defp dispatch(%Request{method: "session.permit", id: id, params: params}, state) do
+    decision = String.to_existing_atom(params.decision)
+
+    case Session.permit(params.id, params.call_id, decision) do
+      :ok -> {result(id, "session.permit", %{}), state}
       {:error, reason} -> {session_error(id, reason), state}
     end
   end
@@ -216,6 +235,9 @@ defmodule Sadld.Connection do
 
   defp session_error(id, :not_found), do: error(id, @session_not_found, "session not found")
   defp session_error(id, :busy), do: error(id, @session_busy, "session busy")
+
+  defp session_error(id, :not_pending),
+    do: error(id, @not_pending, "no pending permission request")
 
   defp result(id, method, result), do: %Response{id: id, method: method, result: result}
 

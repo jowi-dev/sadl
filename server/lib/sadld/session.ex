@@ -391,26 +391,23 @@ defmodule Sadld.Session do
   # session. Before each request it compacts the context if that is near
   # the limit. Returns `:completed` or `{:error, reason}`.
   defp run_turn(ctx, env, report) do
-    {provider, provider_opts} = env.provider
-    on_text = &report.({:notify, "turn.delta", %{text: &1}})
+    with {:ok, ctx} <- maybe_compact(ctx, env, report),
+         {:ok, reply} <- request(ctx, env, report) do
+      %{text: text, tool_calls: tool_calls, usage: usage} = reply
+      results = Enum.map(tool_calls, &run_tool(&1, Map.put(env, :report, report)))
+      step = [%{role: :assistant, content: text, tool_calls: tool_calls} | results]
+      report.({:step, step, usage})
 
-    with {:ok, ctx} <- maybe_compact(ctx, env, report) do
-      messages = Compaction.context(ctx.messages, ctx.compaction)
-
-      case provider.chat(messages, Keyword.put(provider_opts, :on_text, on_text)) do
-        {:ok, %{text: text, tool_calls: tool_calls, usage: usage}} ->
-          results = Enum.map(tool_calls, &run_tool(&1, Map.put(env, :report, report)))
-          step = [%{role: :assistant, content: text, tool_calls: tool_calls} | results]
-          report.({:step, step, usage})
-
-          if tool_calls == [],
-            do: :completed,
-            else: run_turn(add_step(ctx, step, usage), env, report)
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      if tool_calls == [],
+        do: :completed,
+        else: run_turn(add_step(ctx, step, usage), env, report)
     end
+  end
+
+  defp request(ctx, %{provider: {provider, provider_opts}}, report) do
+    on_text = &report.({:notify, "turn.delta", %{text: &1}})
+    messages = Compaction.context(ctx.messages, ctx.compaction)
+    provider.chat(messages, Keyword.put(provider_opts, :on_text, on_text))
   end
 
   # A `compact/1` turn: summarizes everything but the recent tail, or the

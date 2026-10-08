@@ -45,7 +45,11 @@ where
         tokio::select! {
             biased;
             incoming = link.recv() => match incoming? {
-                Incoming::Message(message) => app.on_message(message),
+                Incoming::Message(message) => {
+                    if let Some(call) = app.on_message(message) {
+                        send(link, app, call).await;
+                    }
+                }
                 Incoming::Reconnected => {
                     let call = app.on_reconnected();
                     send(link, app, call).await;

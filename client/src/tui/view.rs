@@ -251,13 +251,15 @@ fn status_line(app: &App, width: usize) -> Line<'static> {
         ),
         None => " connecting…".to_string(),
     };
-    let mut right = match (&app.session, app.running) {
-        (None, _) => String::new(),
-        (Some(_), _) if app.asking.is_some() => {
+    let mut right = match (&app.session, app.running, app.is_read_only()) {
+        (None, _, _) => String::new(),
+        (Some(_), _, _) if app.asking.is_some() => {
             "waiting for permission (Esc to cancel)".to_string()
         }
-        (Some(_), true) => "running (Esc to cancel)".to_string(),
-        (Some(_), false) => "idle".to_string(),
+        (Some(_), true, true) => "read-only · running".to_string(),
+        (Some(_), false, true) => "read-only · idle".to_string(),
+        (Some(_), true, false) => "running (Esc to cancel)".to_string(),
+        (Some(_), false, false) => "idle".to_string(),
     };
     if app.scroll > 0 {
         right = format!("scrolled {} · {right}", app.scroll);
@@ -280,13 +282,17 @@ mod tests {
         Event, JsonRpc, Notification, Outcome, PermissionRequest, Response, ServerMessage,
         StopReason, ToolCall, ToolResult, TurnDelta, TurnEnd, Usage,
     };
+    use crate::start::Start;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use serde_json::{Map, json};
 
     fn opened() -> App {
-        let mut app = App::new("/p".into(), None);
+        let mut app = App::new(Start::Open {
+            cwd: "/p".into(),
+            model: None,
+        });
         let open = app.open_call();
         app.sent(1, &open);
         app.on_message(ServerMessage::Response(Response {
@@ -381,8 +387,30 @@ mod tests {
     }
 
     #[test]
+    fn the_status_line_says_an_attached_view_is_read_only() {
+        let mut app = App::new(Start::Resume { id: "s_1".into() }).read_only();
+        let resume = app.open_call();
+        app.sent(1, &resume);
+        app.on_message(ServerMessage::Response(Response {
+            jsonrpc: JsonRpc::V2,
+            id: Some(1),
+            outcome: Outcome::Result(json!({
+                "id": "s_1", "cwd": "/p", "model": "m-1",
+                "updated_at": "2026-01-01T00:00:00Z"
+            })),
+        }));
+
+        let rows = render(&mut app, 60, 8);
+
+        assert!(rows.last().unwrap().contains("read-only · idle"));
+    }
+
+    #[test]
     fn the_status_line_says_when_the_session_is_not_open_yet() {
-        let mut app = App::new("/p".into(), None);
+        let mut app = App::new(Start::Open {
+            cwd: "/p".into(),
+            model: None,
+        });
 
         let rows = render(&mut app, 60, 8);
 

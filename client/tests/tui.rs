@@ -9,6 +9,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use sadl::link::{Backoff, Link};
 use sadl::protocol::{Call, Request};
+use sadl::start::Start;
 use sadl::tui::{self, app::App};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::UnixListener;
@@ -104,7 +105,10 @@ async fn chats_with_the_server_until_ctrl_c() {
 
     let client = tokio::spawn(async move {
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
-        let mut app = App::new("/home/u/proj".into(), None);
+        let mut app = App::new(Start::Open {
+            cwd: "/home/u/proj".into(),
+            model: None,
+        });
         tui::run(&mut terminal, &mut link, &mut app, &mut events)
             .await
             .expect("run");

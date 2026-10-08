@@ -10,6 +10,7 @@ use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
 use sadl::connection::default_socket_path;
 use sadl::link::{Backoff, Link};
+use sadl::start::Start;
 use sadl::tui::{self, app::App};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -37,7 +38,7 @@ async fn chat() -> Result<(), tui::RunError> {
     )
     .await
     .map_err(|_| format!("sadld is not running at {}", path.display()))??;
-    let mut app = App::new(cwd, None);
+    let mut app = App::new(Start::Open { cwd, model: None });
 
     let (keys, mut events) = mpsc::unbounded_channel();
     std::thread::spawn(move || {

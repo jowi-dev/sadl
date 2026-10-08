@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "id": 0, "result": {"tools": [{"name": "thatch_memory_recall", "description": "Search memories.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": false}}]}}

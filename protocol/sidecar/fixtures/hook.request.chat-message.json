@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "id": 3, "method": "hook", "params": {"name": "chat.message", "input": {"sessionID": "s_1", "messageID": "t_1"}, "output": {"message": {"id": "t_1", "sessionID": "s_1", "role": "user"}, "parts": [{"id": "t_1_0", "sessionID": "s_1", "messageID": "t_1", "type": "text", "text": "how do we run the tests?"}]}}}

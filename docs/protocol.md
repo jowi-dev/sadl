@@ -73,6 +73,7 @@ A `SessionInfo` object is `{id, cwd, model, updated_at}`: all strings,
 | `session.send`   | `{id: string, text: string}`    | `{turn_id: string}`            |
 | `session.cancel` | `{id: string}`                  | `{}`                           |
 | `session.permit` | `{id, call_id, decision}`       | `{}`                           |
+| `session.compact` | `{id: string}`                  | `{turn_id: string}`            |
 | `session.list`   | `{}`                            | `{sessions: [SessionInfo]}`    |
 
 - `session.open` starts a new session whose tools run in `cwd` (absolute
@@ -93,6 +94,11 @@ A `SessionInfo` object is `{id, cwd, model, updated_at}`: all strings,
   in session `id`. `decision` is `"allow"` (the tool runs) or `"deny"` (it
   fails without running). Answering a call that is not waiting, including
   one another client already answered, fails with `-32004`.
+- `session.compact` compacts the session's context now, as a turn of its
+  own, and answers like `session.send`: with the turn id before any
+  notification for it, or `-32003` while a turn is running. The turn sends
+  `turn.compacted` unless there was nothing to compact, then ends with
+  `turn.end`. See "Compaction" below.
 
 ## Notifications
 
@@ -106,6 +112,7 @@ Every notification below carries `session_id` and, except `error`,
 | `permission.request` | `{session_id, turn_id, call_id: string}`                                 |
 | `tool.result`        | `{session_id, turn_id, call_id: string, output: string, is_error: bool}` |
 | `turn.end`           | `{session_id, turn_id, stop_reason: string, usage: Usage}`               |
+| `turn.compacted`     | `{session_id, turn_id, summary: string}`                                 |
 | `error`              | `{session_id, code: int, message: string}`                               |
 
 - `turn.delta` is the next chunk of assistant text. Concatenating a turn's
@@ -126,9 +133,21 @@ Every notification below carries `session_id` and, except `error`,
   `"completed"`, `"cancelled"`, `"error"`. `Usage` is
   `{input_tokens: int, output_tokens: int}`, the turn's totals (zero if the
   provider reported none).
+- `turn.compacted` reports that the session's older messages were replaced
+  by `summary` in what is sent to the model. It comes from `session.compact`
+  or from a turn that neared the model's context limit, in which case it
+  arrives before that step's first `turn.delta`. Usage of the summary request
+  counts toward the turn's `turn.end` usage.
 - `error` reports a failure that has no request to answer, such as a
   provider failure mid-turn. A turn that fails sends `error` and then
   `turn.end` with `stop_reason: "error"`.
+
+## Compaction
+
+When a session's context nears the model's context window, the server
+summarizes its older messages before the next model request, keeping the
+newest messages verbatim. The full transcript stays in the store; only what
+is sent to the model changes. See ADR-0003.
 
 ## Error codes
 

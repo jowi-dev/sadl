@@ -104,6 +104,7 @@ impl Transcript {
                     self.push_notice("turn cancelled");
                 }
             }
+            Event::TurnCompacted(_) => {}
             Event::Error(error) => {
                 self.push_notice(&format!("error {}: {}", error.code, error.message));
             }

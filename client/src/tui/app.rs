@@ -114,7 +114,7 @@ impl App {
             Call::SessionSend(_) => Pending::Send,
             Call::SessionCancel(_) => Pending::Cancel,
             Call::SessionPermit(_) => Pending::Permit,
-            Call::Handshake(_) | Call::SessionList(_) => Pending::Other,
+            Call::Handshake(_) | Call::SessionCompact(_) | Call::SessionList(_) => Pending::Other,
         };
         self.pending.insert(id, pending);
     }
@@ -325,7 +325,9 @@ impl App {
                     self.asking = Some(request.call_id.clone());
                 }
             }
-            Event::TurnDelta(_) | Event::ToolCall(_) => self.running = true,
+            Event::TurnDelta(_) | Event::ToolCall(_) | Event::TurnCompacted(_) => {
+                self.running = true
+            }
             Event::ToolResult(result) => {
                 self.running = true;
                 if self.asking.as_ref() == Some(&result.call_id) {
@@ -356,6 +358,7 @@ fn event_session(event: &Event) -> &str {
         Event::PermissionRequest(e) => &e.session_id,
         Event::ToolResult(e) => &e.session_id,
         Event::TurnEnd(e) => &e.session_id,
+        Event::TurnCompacted(e) => &e.session_id,
         Event::Error(e) => &e.session_id,
     }
 }

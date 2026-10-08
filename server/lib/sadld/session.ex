@@ -89,7 +89,8 @@ defmodule Sadld.Session do
       (default `Sadld.SystemPrompt.build/1` of `:cwd`, built once at start
       so later edits to context files reach only new sessions)
     * `:compaction` - options for `Sadld.Compaction`, over its app config
-    * `:plugins` - the session's `Sadld.Plugin`s (default none)
+    * `:plugins` - the session's `Sadld.Plugin`s (default
+      `Sadld.Plugins.for_cwd/1` of `:cwd`)
   """
   @spec start(keyword()) :: {:ok, id()} | {:error, term()}
   def start(opts) do
@@ -234,7 +235,7 @@ defmodule Sadld.Session do
       tools: Keyword.fetch!(opts, :tools),
       permissions: Keyword.get_lazy(opts, :permissions, &Permissions.allow_all/0),
       compaction_opts: Keyword.get(opts, :compaction, []),
-      plugins: Keyword.get(opts, :plugins, []),
+      plugins: Keyword.get_lazy(opts, :plugins, fn -> Sadld.Plugins.for_cwd(cwd) end),
       messages: Store.messages(id),
       compaction: Store.latest_compaction(id),
       context_tokens: nil,

@@ -81,7 +81,8 @@ in one long-lived server.
 ## MVP scope (pi.dev-shaped, not Claude Code-shaped)
 
 - Four tools: `read`, `write`, `edit`, `bash`. No permission prompts (YOLO,
-  like pi); permissions come later.
+  like pi); a per-session allow/ask/deny policy followed (ADR-0003), and
+  without a policy file every call still runs.
 - One provider: Venice.ai through an OpenAI-compatible adapter (default
   model GLM 5.3 Flash, `z-ai-glm-5-3-flash`, configurable). The API key
   comes from `VENICE_API_KEY` or `$XDG_CONFIG_HOME/sadl/api_key`, never

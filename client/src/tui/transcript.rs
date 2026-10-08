@@ -107,6 +107,8 @@ impl Transcript {
             Event::Error(error) => {
                 self.push_notice(&format!("error {}: {}", error.code, error.message));
             }
+            // The app shows the prompt; the tool block already names the call.
+            Event::PermissionRequest(_) => {}
         }
     }
 

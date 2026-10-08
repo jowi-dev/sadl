@@ -15,7 +15,7 @@ defmodule Sadld.SessionTest do
     [
       provider: {StubProvider, respond: respond},
       tools: {StubTools, run: run}
-    ]
+    ] ++ Keyword.take(opts, [:permissions])
   end
 
   defp start_session(respond, opts \\ []) do
@@ -278,6 +278,138 @@ defmodule Sadld.SessionTest do
     end
   end
 
+  describe "permissions" do
+    @bash %{id: "call_1", name: "bash", args: %{"command" => "rm -rf build"}}
+
+    # A model that calls bash once, then replies with the result it read.
+    defp call_bash_once(messages) do
+      case List.last(messages) do
+        %{role: :user} -> {:ok, %{text: "", tool_calls: [@bash], usage: @usage}}
+        %{role: :tool, content: content} -> reply("saw: " <> content)
+      end
+    end
+
+    defp policy(action) do
+      {:ok, policy} =
+        Sadld.Permissions.parse(%{
+          "default" => "allow",
+          "rules" => [%{"tool" => "bash", "action" => action}]
+        })
+
+      policy
+    end
+
+    # Starts a session whose tools report each run to the test process.
+    defp start_with_policy(action) do
+      test_pid = self()
+
+      run = fn call, _cwd ->
+        send(test_pid, {:ran, call.id})
+        {:ok, "removed"}
+      end
+
+      start_session(&call_bash_once/1, run: run, permissions: policy(action))
+    end
+
+    defp assert_waiting(turn_id) do
+      assert_receive {:session_event, _id, %Notification{method: "tool.call"}}
+      assert_receive {:session_event, _id, %Notification{method: "permission.request"} = n}
+      assert n.params.turn_id == turn_id
+      n.params
+    end
+
+    test "a call the policy denies fails without running and the turn continues" do
+      id = start_with_policy("deny")
+      {:ok, turn_id} = Session.send_message(id, "clean")
+
+      assert [
+               %Notification{method: "tool.call"},
+               %Notification{method: "tool.result", params: result},
+               %Notification{method: "turn.delta"},
+               %Notification{method: "turn.end", params: %{stop_reason: "completed"}}
+             ] = collect_turn(turn_id)
+
+      assert result.is_error
+      assert result.output == "permission denied by policy"
+      refute_received {:ran, _call_id}
+    end
+
+    test "a call the policy asks about waits for a client to allow it" do
+      id = start_with_policy("ask")
+      {:ok, turn_id} = Session.send_message(id, "clean")
+
+      assert assert_waiting(turn_id) == %{session_id: id, turn_id: turn_id, call_id: "call_1"}
+      refute_receive {:ran, _call_id}, 50
+
+      assert Session.permit(id, "call_1", :allow) == :ok
+
+      assert_receive {:ran, "call_1"}
+
+      assert [
+               %Notification{method: "tool.result", params: %{output: "removed"}},
+               %Notification{method: "turn.delta", params: %{text: "saw: removed"}},
+               %Notification{method: "turn.end", params: %{stop_reason: "completed"}}
+             ] = collect_turn(turn_id)
+    end
+
+    test "a call a client denies fails without running" do
+      id = start_with_policy("ask")
+      {:ok, turn_id} = Session.send_message(id, "clean")
+      assert_waiting(turn_id)
+
+      assert Session.permit(id, "call_1", :deny) == :ok
+
+      assert [
+               %Notification{method: "tool.result", params: result},
+               %Notification{method: "turn.delta"},
+               %Notification{method: "turn.end", params: %{stop_reason: "completed"}}
+             ] = collect_turn(turn_id)
+
+      assert result == %{
+               session_id: id,
+               turn_id: turn_id,
+               call_id: "call_1",
+               output: "permission denied by the user",
+               is_error: true
+             }
+
+      refute_received {:ran, _call_id}
+    end
+
+    test "only the first answer counts" do
+      id = start_with_policy("ask")
+      {:ok, turn_id} = Session.send_message(id, "clean")
+      assert_waiting(turn_id)
+
+      assert Session.permit(id, "call_1", :allow) == :ok
+      assert Session.permit(id, "call_1", :deny) == {:error, :not_pending}
+      assert List.last(collect_turn(turn_id)).params.stop_reason == "completed"
+    end
+
+    test "answering a call that is not waiting is :not_pending" do
+      id = start_with_policy("ask")
+      assert Session.permit(id, "call_1", :allow) == {:error, :not_pending}
+
+      {:ok, turn_id} = Session.send_message(id, "clean")
+      assert_waiting(turn_id)
+      assert Session.permit(id, "other", :allow) == {:error, :not_pending}
+    end
+
+    test "cancelling a waiting turn drops its request" do
+      id = start_with_policy("ask")
+      {:ok, turn_id} = Session.send_message(id, "clean")
+      assert_waiting(turn_id)
+
+      assert Session.cancel(id) == :ok
+
+      assert [%Notification{method: "turn.end", params: %{stop_reason: "cancelled"}}] =
+               collect_turn(turn_id)
+
+      assert Session.permit(id, "call_1", :allow) == {:error, :not_pending}
+      refute_received {:ran, _call_id}
+    end
+  end
+
   test "cancel with no running turn does nothing" do
     id = start_session(fn _ -> reply("hi") end)
 
@@ -288,6 +420,7 @@ defmodule Sadld.SessionTest do
   test "calls on an unknown session return :not_found" do
     assert Session.send_message("missing", "hi") == {:error, :not_found}
     assert Session.cancel("missing") == {:error, :not_found}
+    assert Session.permit("missing", "call_1", :allow) == {:error, :not_found}
     assert Session.messages("missing") == {:error, :not_found}
   end
 

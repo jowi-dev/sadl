@@ -72,6 +72,7 @@ A `SessionInfo` object is `{id, cwd, model, updated_at}`: all strings,
 | `session.resume` | `{id: string}`                  | `SessionInfo`                  |
 | `session.send`   | `{id: string, text: string}`    | `{turn_id: string}`            |
 | `session.cancel` | `{id: string}`                  | `{}`                           |
+| `session.permit` | `{id, call_id, decision}`       | `{}`                           |
 | `session.list`   | `{}`                            | `{sessions: [SessionInfo]}`    |
 
 - `session.open` starts a new session whose tools run in `cwd` (absolute
@@ -88,24 +89,36 @@ A `SessionInfo` object is `{id, cwd, model, updated_at}`: all strings,
   a session with no running turn succeeds and does nothing.
 - `session.list` returns every persisted session, most recently updated
   first.
+- `session.permit` answers the `permission.request` for tool call `call_id`
+  in session `id`. `decision` is `"allow"` (the tool runs) or `"deny"` (it
+  fails without running). Answering a call that is not waiting, including
+  one another client already answered, fails with `-32004`.
 
 ## Notifications
 
 Every notification below carries `session_id` and, except `error`,
 `turn_id`.
 
-| Method        | Params                                                                         |
-|---------------|--------------------------------------------------------------------------------|
-| `turn.delta`  | `{session_id, turn_id, text: string}`                                          |
-| `tool.call`   | `{session_id, turn_id, call_id: string, name: string, args: object}`           |
-| `tool.result` | `{session_id, turn_id, call_id: string, output: string, is_error: bool}`       |
-| `turn.end`    | `{session_id, turn_id, stop_reason: string, usage: Usage}`                     |
-| `error`       | `{session_id, code: int, message: string}`                                     |
+| Method               | Params                                                                   |
+|----------------------|--------------------------------------------------------------------------|
+| `turn.delta`         | `{session_id, turn_id, text: string}`                                    |
+| `tool.call`          | `{session_id, turn_id, call_id: string, name: string, args: object}`     |
+| `permission.request` | `{session_id, turn_id, call_id: string}`                                 |
+| `tool.result`        | `{session_id, turn_id, call_id: string, output: string, is_error: bool}` |
+| `turn.end`           | `{session_id, turn_id, stop_reason: string, usage: Usage}`               |
+| `error`              | `{session_id, code: int, message: string}`                               |
 
 - `turn.delta` is the next chunk of assistant text. Concatenating a turn's
   deltas yields its full text.
 - `tool.call` is sent when the model calls a tool, before it runs. `args` is
   the tool's argument object, passed through untouched.
+- `permission.request` follows a `tool.call` that the session's permission
+  policy (ADR-0003) says to ask about. The tool waits until a client answers
+  with `session.permit`, or the turn is cancelled; there is no timeout. A
+  call the policy denies gets no `permission.request`, only an error
+  `tool.result`. Clients should treat the request as settled once the
+  call's `tool.result` or the turn's `turn.end` arrives, since another
+  client may have answered it.
 - `tool.result` follows its `tool.call` (matched by `call_id`). A tool that
   failed reports `is_error: true` with the failure in `output`; that is not a
   protocol error.
@@ -130,6 +143,7 @@ Every notification below carries `session_id` and, except `error`,
 | `-32001` | Handshake required              |                         |
 | `-32002` | Session not found               |                         |
 | `-32003` | Session busy (turn in progress) |                         |
+| `-32004` | No pending permission request   |                         |
 | `-32010` | Provider error                  |                         |
 
 ## Fixtures
@@ -144,4 +158,5 @@ so a new message cannot be added without wiring it into both.
 
 - Replaying a resumed session's transcript to the client.
 - Client → server notifications.
-- Permission prompts (ADR-0001: MVP has none).
+- Replaying a pending `permission.request` to a client that attaches while
+  it waits.

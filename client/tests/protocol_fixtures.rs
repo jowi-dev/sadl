@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use sadl::protocol::{
     HandshakeResult, Notification, Outcome, Request, Response, ServerMessage, SessionCancelResult,
-    SessionInfo, SessionListResult, SessionSendResult,
+    SessionInfo, SessionListResult, SessionPermitResult, SessionSendResult,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -42,6 +42,7 @@ fn roundtrip_fixture(method: &str, kind: &str, original: &Value) -> Value {
         }
         ("response", "session.send") => roundtrip::<Response<SessionSendResult>>(original),
         ("response", "session.cancel") => roundtrip::<Response<SessionCancelResult>>(original),
+        ("response", "session.permit") => roundtrip::<Response<SessionPermitResult>>(original),
         ("response", "session.list") => roundtrip::<Response<SessionListResult>>(original),
         _ => panic!("no response type for method {method}"),
     }

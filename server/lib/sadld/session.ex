@@ -174,6 +174,14 @@ defmodule Sadld.Session do
   @spec info(id()) :: info() | {:error, :not_found}
   def info(id), do: call(id, :info)
 
+  @doc "Tells whether session `id` is running a turn."
+  @spec status(id()) :: :busy | :idle | {:error, :not_found}
+  def status(id), do: call(id, :status)
+
+  @doc "Returns the ids of the running sessions."
+  @spec running() :: [id()]
+  def running, do: Registry.select(@registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
+
   defp call(id, request) do
     GenServer.call(via(id), request)
   catch
@@ -257,6 +265,9 @@ defmodule Sadld.Session do
   end
 
   def handle_call(:messages, _from, state), do: {:reply, state.messages, state}
+
+  def handle_call(:status, _from, state),
+    do: {:reply, if(state.turn, do: :busy, else: :idle), state}
 
   def handle_call(:info, _from, state) do
     {:reply, Map.take(state, [:id, :cwd, :model, :updated_at]), state}

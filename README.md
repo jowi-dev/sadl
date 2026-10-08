@@ -15,9 +15,30 @@ direnv allow      # or: nix develop
 
 Provides `cargo`/`rustc`/`clippy`/`rustfmt` and `elixir`/`erlang`/`mix`.
 
-## Chat
+## Usage
 
-With `sadld` running, `sadl` opens a new session in the current directory.
+With `sadld` running:
+
+| Command                                   | What it does                                            |
+|-------------------------------------------|---------------------------------------------------------|
+| `sadl [--model M] [PROMPT]`               | Chat in a new session in the current directory, sending `PROMPT` first if given |
+| `sadl --resume ID`                        | Chat in an existing session                             |
+| `sadl -p PROMPT [--output-format json]`   | Run one turn with no TUI and print the result           |
+| `sadl ls`                                 | List sessions, most recently updated first              |
+| `sadl attach ID`                          | Watch a session's turns as they run, read-only          |
+
+`-p` also takes `--model` or `--resume`. It prints the turn's text, or with
+`--output-format json` one line like:
+
+```json
+{"session_id":"s_1","result":"Done.","success":true,"stop_reason":"completed","usage":{"input_tokens":120,"output_tokens":8}}
+```
+
+`error` is added when the run failed. It exits non-zero unless the turn
+completed. A resumed or attached session starts with an empty transcript:
+the server does not replay history yet.
+
+## Chat
 
 | Key                              | Action                                  |
 |----------------------------------|-----------------------------------------|
@@ -32,7 +53,8 @@ With `sadld` running, `sadl` opens a new session in the current directory.
 The status line shows the model, the session id, token totals for the turns
 this window has seen, and whether a turn is running. The client keeps about
 8 MB of transcript text and drops the oldest blocks beyond that; the full
-history stays on the server.
+history stays on the server. An attached window takes only Ctrl+O, PageUp,
+PageDown and Ctrl+C.
 
 ## Permissions
 

@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::protocol::{
-    Call, ErrorObject, Event, Outcome, Response, ServerMessage, SessionIdParams, SessionInfo,
-    SessionOpenParams, SessionSendParams, Usage,
+    Call, Decision, ErrorObject, Event, Outcome, Response, ServerMessage, SessionIdParams,
+    SessionInfo, SessionOpenParams, SessionPermitParams, SessionSendParams, Usage,
 };
 use crate::tui::input::Input;
 use crate::tui::transcript::Transcript;
@@ -28,6 +28,7 @@ enum Pending {
     Resume,
     Send,
     Cancel,
+    Permit,
     Other,
 }
 
@@ -42,6 +43,8 @@ pub struct App {
     pub usage: Usage,
     /// Whether a turn is in progress.
     pub running: bool,
+    /// The tool call waiting for this client to allow or deny it.
+    pub asking: Option<String>,
     /// Whether tool blocks show their arguments and output.
     pub expand_tools: bool,
     /// How many lines the transcript is scrolled up from the bottom.
@@ -67,6 +70,7 @@ impl App {
                 output_tokens: 0,
             },
             running: false,
+            asking: None,
             expand_tools: false,
             scroll: 0,
             page: DEFAULT_PAGE,
@@ -92,7 +96,8 @@ impl App {
             Call::SessionResume(_) => Pending::Resume,
             Call::SessionSend(_) => Pending::Send,
             Call::SessionCancel(_) => Pending::Cancel,
-            Call::Handshake(_) | Call::SessionList(_) | Call::SessionPermit(_) => Pending::Other,
+            Call::SessionPermit(_) => Pending::Permit,
+            Call::Handshake(_) | Call::SessionList(_) => Pending::Other,
         };
         self.pending.insert(id, pending);
     }
@@ -103,11 +108,23 @@ impl App {
     /// newline. Esc cancels the running turn. Ctrl+O expands or collapses
     /// tool blocks. PageUp/PageDown scroll the transcript. Ctrl+C clears the
     /// input, or quits when it is already empty.
+    ///
+    /// While a tool call waits for permission, y allows it, n denies it, and
+    /// other text and editing keys do nothing.
     pub fn on_key(&mut self, key: KeyEvent) -> Option<Call> {
         if key.kind == KeyEventKind::Release {
             return None;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.asking.is_some() {
+            match key.code {
+                KeyCode::Char('y') if !ctrl => return self.answer(Decision::Allow),
+                KeyCode::Char('n') if !ctrl => return self.answer(Decision::Deny),
+                KeyCode::Char('c' | 'o') if ctrl => {}
+                KeyCode::Esc | KeyCode::PageUp | KeyCode::PageDown => {}
+                _ => return None,
+            }
+        }
         let newline = KeyModifiers::ALT | KeyModifiers::SHIFT;
         match key.code {
             KeyCode::Enter if key.modifiers.intersects(newline) => self.input.insert('\n'),
@@ -166,6 +183,7 @@ impl App {
     /// forgotten, and a running turn is given up as lost.
     pub fn on_reconnected(&mut self) -> Call {
         self.pending.clear();
+        self.asking = None;
         if self.running {
             self.running = false;
             self.transcript
@@ -204,6 +222,16 @@ impl App {
         Some(Call::SessionSend(SessionSendParams { id, text }))
     }
 
+    fn answer(&mut self, decision: Decision) -> Option<Call> {
+        let call_id = self.asking.take()?;
+        let id = self.session.as_ref()?.id.clone();
+        Some(Call::SessionPermit(SessionPermitParams {
+            id,
+            call_id,
+            decision,
+        }))
+    }
+
     fn cancel(&mut self) -> Option<Call> {
         match &self.session {
             Some(session) if self.running => Some(Call::SessionCancel(SessionIdParams {
@@ -236,6 +264,9 @@ impl App {
             (Pending::Cancel, Outcome::Error(error)) => {
                 self.notice_error("cannot cancel", &error);
             }
+            (Pending::Permit, Outcome::Error(error)) => {
+                self.notice_error("cannot answer the permission request", &error);
+            }
             _ => {}
         }
     }
@@ -247,10 +278,18 @@ impl App {
         if event_session(event) != session.id {
             return;
         }
-        if let Event::TurnEnd(end) = event {
-            self.running = false;
-            self.usage.input_tokens += end.usage.input_tokens;
-            self.usage.output_tokens += end.usage.output_tokens;
+        match event {
+            Event::PermissionRequest(request) => self.asking = Some(request.call_id.clone()),
+            Event::ToolResult(result) if self.asking.as_ref() == Some(&result.call_id) => {
+                self.asking = None;
+            }
+            Event::TurnEnd(end) => {
+                self.running = false;
+                self.asking = None;
+                self.usage.input_tokens += end.usage.input_tokens;
+                self.usage.output_tokens += end.usage.output_tokens;
+            }
+            _ => {}
         }
         self.transcript.apply(event);
     }
@@ -275,7 +314,10 @@ fn event_session(event: &Event) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{JsonRpc, Notification, StopReason, TurnDelta, TurnEnd};
+    use crate::protocol::{
+        Decision, JsonRpc, Notification, PermissionRequest, SessionPermitParams, StopReason,
+        ToolCall, ToolResult, TurnDelta, TurnEnd,
+    };
     use crate::tui::transcript::Block;
     use serde_json::json;
 
@@ -600,6 +642,142 @@ mod tests {
         assert_eq!(app.on_reconnected(), open);
         respond(&mut app, 1, session_json("stale"));
         assert_eq!(app.session, None);
+    }
+
+    fn tool_call(call_id: &str) -> Event {
+        Event::ToolCall(ToolCall {
+            session_id: "s_1".into(),
+            turn_id: "t_1".into(),
+            call_id: call_id.into(),
+            name: "bash".into(),
+            args: serde_json::Map::new(),
+        })
+    }
+
+    fn permission_request(session_id: &str, call_id: &str) -> Event {
+        Event::PermissionRequest(PermissionRequest {
+            session_id: session_id.into(),
+            turn_id: "t_1".into(),
+            call_id: call_id.into(),
+        })
+    }
+
+    fn tool_result(call_id: &str) -> Event {
+        Event::ToolResult(ToolResult {
+            session_id: "s_1".into(),
+            turn_id: "t_1".into(),
+            call_id: call_id.into(),
+            output: "ok".into(),
+            is_error: false,
+        })
+    }
+
+    /// An app whose running turn is waiting on permission for call `c_1`.
+    fn asking() -> App {
+        let mut app = opened();
+        type_text(&mut app, "go");
+        app.on_key(key(KeyCode::Enter));
+        notify(&mut app, tool_call("c_1"));
+        notify(&mut app, permission_request("s_1", "c_1"));
+        app
+    }
+
+    fn permit(decision: Decision) -> Call {
+        Call::SessionPermit(SessionPermitParams {
+            id: "s_1".into(),
+            call_id: "c_1".into(),
+            decision,
+        })
+    }
+
+    #[test]
+    fn a_permission_request_waits_for_an_answer() {
+        let app = asking();
+
+        assert_eq!(app.asking.as_deref(), Some("c_1"));
+    }
+
+    #[test]
+    fn permission_requests_for_other_sessions_are_ignored() {
+        let mut app = opened();
+        notify(&mut app, permission_request("s_2", "c_1"));
+
+        assert_eq!(app.asking, None);
+    }
+
+    #[test]
+    fn y_allows_and_n_denies_the_waiting_call() {
+        let mut app = asking();
+        assert_eq!(
+            app.on_key(key(KeyCode::Char('y'))),
+            Some(permit(Decision::Allow))
+        );
+        assert_eq!(app.asking, None);
+
+        let mut app = asking();
+        assert_eq!(
+            app.on_key(key(KeyCode::Char('n'))),
+            Some(permit(Decision::Deny))
+        );
+        assert_eq!(app.asking, None);
+    }
+
+    #[test]
+    fn other_text_keys_do_nothing_while_asking() {
+        let mut app = asking();
+
+        assert_eq!(app.on_key(key(KeyCode::Char('x'))), None);
+        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+        assert_eq!(app.on_key(ctrl('j')), None);
+        assert_eq!(app.input.text(), "");
+        assert_eq!(app.asking.as_deref(), Some("c_1"));
+    }
+
+    #[test]
+    fn esc_still_cancels_while_asking() {
+        let mut app = asking();
+
+        assert_eq!(
+            app.on_key(key(KeyCode::Esc)),
+            Some(Call::SessionCancel(SessionIdParams { id: "s_1".into() }))
+        );
+    }
+
+    #[test]
+    fn the_request_is_settled_by_its_result_or_the_turn_end() {
+        let mut app = asking();
+        notify(&mut app, tool_result("other"));
+        assert_eq!(app.asking.as_deref(), Some("c_1"));
+        notify(&mut app, tool_result("c_1"));
+        assert_eq!(app.asking, None);
+
+        let mut app = asking();
+        notify(&mut app, end(StopReason::Cancelled, 0, 0));
+        assert_eq!(app.asking, None);
+    }
+
+    #[test]
+    fn reconnecting_drops_the_request() {
+        let mut app = asking();
+        app.on_reconnected();
+
+        assert_eq!(app.asking, None);
+    }
+
+    #[test]
+    fn a_rejected_answer_is_shown() {
+        let mut app = asking();
+        let call = app.on_key(key(KeyCode::Char('y'))).unwrap();
+        app.sent(2, &call);
+        respond_error(&mut app, 2, -32004, "no pending permission request");
+
+        assert_eq!(
+            blocks(&app).last(),
+            Some(&Block::Notice(
+                "cannot answer the permission request (-32004): no pending permission request"
+                    .into()
+            ))
+        );
     }
 
     #[test]

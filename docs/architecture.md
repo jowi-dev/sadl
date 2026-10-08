@@ -69,6 +69,10 @@ in one long-lived server.
   loses at most the in-flight request.
 - Sessions and their messages, tool calls and results included, live in
   SQLite at `$XDG_DATA_HOME/sadl/sadl.db` (`exqlite`, no Ecto).
+- Sessions are extended by plugins: opencode plugins such as thatch run
+  unmodified in a supervised Bun sidecar per worktree, adding tools and
+  hooking prompts, tool results and session events (ADR-0004,
+  `docs/sidecar.md`).
 
 ### Protocol
 

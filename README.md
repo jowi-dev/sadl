@@ -13,7 +13,8 @@ See [`docs/architecture.md`](docs/architecture.md) for the design draft.
 direnv allow      # or: nix develop
 ```
 
-Provides `cargo`/`rustc`/`clippy`/`rustfmt` and `elixir`/`erlang`/`mix`.
+Provides `cargo`/`rustc`/`clippy`/`rustfmt`, `elixir`/`erlang`/`mix` and
+`bun`, and exports `SADL_THATCH_PLUGIN` (see [Plugins](#plugins-thatch)).
 
 ## Usage
 
@@ -78,3 +79,16 @@ where `*` matches anything) decides; `default` covers the rest. A denied call
 fails and the model is told why. A call that asks replaces the prompt with
 `? allow <tool> <args>  y / n` until a client attached to the session answers.
 See [ADR-0003](docs/decisions/0003-permission-policy.md).
+
+## Plugins (thatch)
+
+sadld runs opencode plugins unmodified, each in a Bun sidecar it supervises,
+one per plugin and git worktree, started by the first session there. The dev
+shell points `SADL_THATCH_PLUGIN` at the pinned
+[thatch](https://github.com/jowi-dev/thatch) package, so a `sadld` started
+from it gives every session thatch's memory tools, its instructions in the
+system prompt and its recall nudges. Set `config :sadld, plugins: [paths]`
+to load others instead, or `[]` for none. Without Bun, or with the variable
+unset, sessions run without plugins. See
+[ADR-0004](docs/decisions/0004-plugin-sidecar.md) and
+[`docs/sidecar.md`](docs/sidecar.md).

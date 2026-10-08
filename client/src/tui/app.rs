@@ -92,7 +92,7 @@ impl App {
             Call::SessionResume(_) => Pending::Resume,
             Call::SessionSend(_) => Pending::Send,
             Call::SessionCancel(_) => Pending::Cancel,
-            Call::Handshake(_) | Call::SessionList(_) => Pending::Other,
+            Call::Handshake(_) | Call::SessionList(_) | Call::SessionPermit(_) => Pending::Other,
         };
         self.pending.insert(id, pending);
     }
@@ -265,6 +265,7 @@ fn event_session(event: &Event) -> &str {
     match event {
         Event::TurnDelta(e) => &e.session_id,
         Event::ToolCall(e) => &e.session_id,
+        Event::PermissionRequest(e) => &e.session_id,
         Event::ToolResult(e) => &e.session_id,
         Event::TurnEnd(e) => &e.session_id,
         Event::Error(e) => &e.session_id,

@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "id": 6, "method": "session.permit", "params": {"id": "s_01", "call_id": "c_01", "decision": "deny"}}

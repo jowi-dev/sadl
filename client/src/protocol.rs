@@ -43,6 +43,8 @@ pub enum Call {
     SessionSend(SessionSendParams),
     #[serde(rename = "session.cancel")]
     SessionCancel(SessionIdParams),
+    #[serde(rename = "session.permit")]
+    SessionPermit(SessionPermitParams),
     #[serde(rename = "session.list")]
     SessionList(SessionListParams),
 }
@@ -70,6 +72,23 @@ pub struct SessionIdParams {
 pub struct SessionSendParams {
     pub id: String,
     pub text: String,
+}
+
+/// Params of `session.permit`: the answer to the `permission.request` for
+/// tool call `call_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPermitParams {
+    pub id: String,
+    pub call_id: String,
+    pub decision: Decision,
+}
+
+/// Whether a tool call waiting on a `permission.request` may run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Decision {
+    Allow,
+    Deny,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +145,9 @@ pub struct SessionSendResult {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionCancelResult {}
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPermitResult {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListResult {
     pub sessions: Vec<SessionInfo>,
@@ -147,6 +169,8 @@ pub enum Event {
     TurnDelta(TurnDelta),
     #[serde(rename = "tool.call")]
     ToolCall(ToolCall),
+    #[serde(rename = "permission.request")]
+    PermissionRequest(PermissionRequest),
     #[serde(rename = "tool.result")]
     ToolResult(ToolResult),
     #[serde(rename = "turn.end")]
@@ -170,6 +194,15 @@ pub struct ToolCall {
     pub name: String,
     /// The tool's arguments, passed through untouched.
     pub args: Map<String, Value>,
+}
+
+/// Tool call `call_id` is waiting for a client to answer with
+/// `session.permit`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionRequest {
+    pub session_id: String,
+    pub turn_id: String,
+    pub call_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

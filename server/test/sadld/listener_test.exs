@@ -300,6 +300,35 @@ defmodule Sadld.ListenerTest do
       assert error_code(request(socket, fixture("session.cancel.request.json"))) == -32_002
     end
 
+    test "compacts a session as a turn of its own", %{socket: socket} do
+      handshake(socket)
+      id = open(socket)
+      %{"result" => _} = request(socket, send_request(3, id, "hi"))
+      receive_turn(socket)
+
+      compact = %{fixture("session.compact.request.json") | "params" => %{"id" => id}}
+
+      assert %{"id" => 5, "result" => %{"turn_id" => turn_id}} = request(socket, compact)
+
+      assert [
+               %{"method" => "turn.compacted", "params" => compacted},
+               %{"method" => "turn.end", "params" => %{"stop_reason" => "completed"}}
+             ] = receive_turn(socket)
+
+      assert %{"session_id" => ^id, "turn_id" => ^turn_id, "summary" => "echo: " <> _} =
+               compacted
+    end
+
+    test "compact on an unknown or busy session answers with an error", %{socket: socket} do
+      handshake(socket)
+      assert error_code(request(socket, fixture("session.compact.request.json"))) == -32_002
+
+      id = open(socket)
+      %{"result" => _} = request(socket, send_request(3, id, "wait"))
+      compact = %{fixture("session.compact.request.json") | "params" => %{"id" => id}}
+      assert error_code(request(socket, compact)) == -32_003
+    end
+
     test "a running turn makes send busy until it is cancelled", %{socket: socket} do
       handshake(socket)
       id = open(socket)

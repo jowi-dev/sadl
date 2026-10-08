@@ -12,9 +12,10 @@ defmodule Sadld.Connection do
   `Sadld.SessionEvents` topic, and every notification on it is written to
   the socket. Several connections can attach to one session and each sees
   the whole stream. A new session gets the permission policy in its
-  `:permissions_path` file. `session.send`, `session.cancel` and
-  `session.permit` work on any running session. Resuming a session that is not running, and `session.list`, wait
-  on persistence and answer with session not found and an internal error.
+  `:permissions_path` file. `session.send`, `session.cancel`,
+  `session.permit` and `session.compact` work on any running session.
+  Resuming a session that is not running, and `session.list`, wait on
+  persistence and answer with session not found and an internal error.
   """
 
   use GenServer, restart: :temporary
@@ -211,6 +212,13 @@ defmodule Sadld.Connection do
 
     case Session.permit(params.id, params.call_id, decision) do
       :ok -> {result(id, "session.permit", %{}), state}
+      {:error, reason} -> {session_error(id, reason), state}
+    end
+  end
+
+  defp dispatch(%Request{method: "session.compact", id: id, params: params}, state) do
+    case Session.compact(params.id) do
+      {:ok, turn_id} -> {result(id, "session.compact", %{turn_id: turn_id}), state}
       {:error, reason} -> {session_error(id, reason), state}
     end
   end

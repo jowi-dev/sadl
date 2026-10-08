@@ -87,16 +87,19 @@ params. The result is the call's `data`; the host hands the plugin
 | `tui.showToast`        | `{body: {message, variant, ...}}`      | `true`                 |
 
 - `Session` is `{id, title, directory, time: {created, updated}}`, times in
-  Unix milliseconds. `session.list` gives the sessions working in the
-  worktree, `session.status` the running ones.
+  Unix milliseconds; sadld keeps no separate creation time, so `created` is
+  `updated`. `session.list` gives the sessions working in the worktree or
+  below it, `session.status` the running ones.
 - `session.messages` gives each message as `info` `{id, sessionID, role}`
   and `parts`, a list of one `{type: "text", text}` part (`synthetic: true`
-  for injected text). Tool calls and results are not included.
-- `session.prompt` and `session.promptAsync` join the text parts into one
-  user message, `synthetic` if any part is. With `noReply` it is recorded
-  without starting a turn, even while one runs. Without it a turn starts,
-  which fails with `-32003` while one is running. Neither waits for the
-  turn: `session.prompt` answers with the recorded message.
+  for injected text). `id` is `<session id>_<position>`. Tool results and
+  assistant messages without text are left out.
+- `session.prompt` and `session.promptAsync` join the text parts, with a
+  blank line between them, into one user message, `synthetic` if any part
+  is. With `noReply` it is recorded without starting a turn, even while one
+  runs. Without it a turn starts, which fails with `-32003` while one is
+  running. Neither waits for the turn: `session.prompt` answers with the
+  recorded message, whose `info` has no `id`. The session must be running.
 - `tui.showToast` writes the message to sadld's log.
 
 Any other method answers `-32601`. That includes `session.create`,

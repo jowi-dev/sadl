@@ -43,6 +43,8 @@ in one long-lived server.
   detached in its own process group, then polls the socket until the server
   answers or a timeout passes. An exclusive lock on `sadld.lock` beside the
   socket lets only one of many clients starting at once launch a server.
+  An optional systemd user unit can run the server instead; upgrades are
+  drain-and-restart with sessions resumed from SQLite (see ADR-0003).
 - Modes, mirroring what `tm`'s `AgentRunner` needs:
   - interactive: `sadl [--model M] [--resume ID] [PROMPT]`
   - headless: `sadl -p PROMPT --output-format json` → prints a `RunOutcome`
@@ -105,6 +107,4 @@ deploying bash hooks into every worktree.
 
 ## Open questions
 
-1. **Server lifecycle:** auto-started by the client, a systemd user unit, or
-   both. MVP default: client auto-start (zero config).
-2. **Server naming:** `sadld` for now; `stable` is on the table.
+1. **Server naming:** `sadld` for now; `stable` is on the table.

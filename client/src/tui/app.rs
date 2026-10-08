@@ -8,8 +8,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::protocol::{
     Call, Decision, ErrorObject, Event, Outcome, Response, ServerMessage, SessionIdParams,
-    SessionInfo, SessionOpenParams, SessionPermitParams, SessionSendParams, Usage,
+    SessionInfo, SessionPermitParams, SessionSendParams, Usage,
 };
+use crate::start::Start;
 use crate::tui::input::Input;
 use crate::tui::transcript::Transcript;
 use serde_json::Value;
@@ -51,16 +52,17 @@ pub struct App {
     pub scroll: usize,
     /// Height of the transcript view at the last draw, for paging.
     pub page: usize,
-    cwd: String,
-    model: Option<String>,
+    start: Start,
+    /// A prompt to send once the session opens, until it is sent.
+    prompt: Option<String>,
+    read_only: bool,
     pending: HashMap<u64, Pending>,
     quit: bool,
 }
 
 impl App {
-    /// An app that will open a new session in `cwd`, with the server's
-    /// default model unless `model` is given.
-    pub fn new(cwd: String, model: Option<String>) -> Self {
+    /// An app that will open or resume the session `start` names.
+    pub fn new(start: Start) -> Self {
         Self {
             transcript: Transcript::new(MAX_TRANSCRIPT_BYTES),
             input: Input::default(),
@@ -74,19 +76,34 @@ impl App {
             expand_tools: false,
             scroll: 0,
             page: DEFAULT_PAGE,
-            cwd,
-            model,
+            start,
+            prompt: None,
+            read_only: false,
             pending: HashMap::new(),
             quit: false,
         }
     }
 
-    /// The request that opens this app's session; send it first.
+    /// Sends `prompt` as the first turn once the session opens.
+    pub fn with_prompt(mut self, prompt: String) -> Self {
+        self.prompt = Some(prompt);
+        self
+    }
+
+    /// Only watches the session: typing, sending and cancelling are
+    /// disabled, and turns started elsewhere are shown as they run.
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// The request that opens or resumes this app's session; send it first.
     pub fn open_call(&self) -> Call {
-        Call::SessionOpen(SessionOpenParams {
-            cwd: self.cwd.clone(),
-            model: self.model.clone(),
-        })
+        self.start.call()
     }
 
     /// Records that `call` went out with request id `id`.
@@ -107,7 +124,8 @@ impl App {
     /// Enter sends the prompt; Alt+Enter, Shift+Enter or Ctrl+J insert a
     /// newline. Esc cancels the running turn. Ctrl+O expands or collapses
     /// tool blocks. PageUp/PageDown scroll the transcript. Ctrl+C clears the
-    /// input, or quits when it is already empty.
+    /// input, or quits when it is already empty. A read-only app ignores
+    /// every key but Ctrl+O, PageUp/PageDown and Ctrl+C.
     ///
     /// While a tool call waits for permission, y allows it, n denies it, and
     /// other text and editing keys do nothing.
@@ -116,6 +134,12 @@ impl App {
             return None;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.read_only {
+            match key.code {
+                KeyCode::Char('c' | 'o') | KeyCode::PageUp | KeyCode::PageDown => {}
+                _ => return None,
+            }
+        }
         if self.asking.is_some() {
             match key.code {
                 KeyCode::Char('y') if !ctrl => return self.answer(Decision::Allow),
@@ -156,8 +180,11 @@ impl App {
     }
 
     /// Inserts pasted text at the cursor, normalising line endings and tabs
-    /// and dropping other control characters.
+    /// and dropping other control characters. A read-only app ignores it.
     pub fn on_paste(&mut self, text: &str) {
+        if self.read_only {
+            return;
+        }
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         for c in text.chars() {
             match c {
@@ -169,11 +196,15 @@ impl App {
         }
     }
 
-    /// Handles a message from the server.
-    pub fn on_message(&mut self, message: ServerMessage) {
+    /// Handles a message from the server, returning the request it
+    /// triggers, if any: the initial prompt, once the session opens.
+    pub fn on_message(&mut self, message: ServerMessage) -> Option<Call> {
         match message {
             ServerMessage::Response(response) => self.on_response(response),
-            ServerMessage::Notification(notification) => self.on_event(&notification.event),
+            ServerMessage::Notification(notification) => {
+                self.on_event(&notification.event);
+                None
+            }
         }
     }
 
@@ -210,12 +241,16 @@ impl App {
     }
 
     fn submit(&mut self) -> Option<Call> {
-        let session = self.session.as_ref()?;
-        if self.running || self.input.is_blank() {
+        if self.session.is_none() || self.running || self.input.is_blank() {
             return None;
         }
-        let id = session.id.clone();
         let text = self.input.take();
+        self.send_text(text)
+    }
+
+    /// Starts a turn of `text` on the open session.
+    fn send_text(&mut self, text: String) -> Option<Call> {
+        let id = self.session.as_ref()?.id.clone();
         self.transcript.push_user(&text);
         self.running = true;
         self.scroll = 0;
@@ -241,14 +276,16 @@ impl App {
         }
     }
 
-    fn on_response(&mut self, response: Response<Value>) {
-        let Some(pending) = response.id.and_then(|id| self.pending.remove(&id)) else {
-            return;
-        };
+    fn on_response(&mut self, response: Response<Value>) -> Option<Call> {
+        let pending = response.id.and_then(|id| self.pending.remove(&id))?;
         match (pending, response.outcome) {
             (Pending::Open | Pending::Resume, Outcome::Result(result)) => {
                 match serde_json::from_value::<SessionInfo>(result) {
-                    Ok(session) => self.session = Some(session),
+                    Ok(session) => {
+                        self.session = Some(session);
+                        let prompt = self.prompt.take()?;
+                        return self.send_text(prompt);
+                    }
                     Err(error) => self
                         .transcript
                         .push_notice(&format!("unreadable session from sadld: {error}")),
@@ -269,6 +306,7 @@ impl App {
             }
             _ => {}
         }
+        None
     }
 
     fn on_event(&mut self, event: &Event) {
@@ -279,9 +317,20 @@ impl App {
             return;
         }
         match event {
-            Event::PermissionRequest(request) => self.asking = Some(request.call_id.clone()),
-            Event::ToolResult(result) if self.asking.as_ref() == Some(&result.call_id) => {
-                self.asking = None;
+            // A turn started by another client shows as running too. A
+            // read-only app cannot answer, so it never shows the prompt.
+            Event::PermissionRequest(request) => {
+                self.running = true;
+                if !self.read_only {
+                    self.asking = Some(request.call_id.clone());
+                }
+            }
+            Event::TurnDelta(_) | Event::ToolCall(_) => self.running = true,
+            Event::ToolResult(result) => {
+                self.running = true;
+                if self.asking.as_ref() == Some(&result.call_id) {
+                    self.asking = None;
+                }
             }
             Event::TurnEnd(end) => {
                 self.running = false;
@@ -289,7 +338,7 @@ impl App {
                 self.usage.input_tokens += end.usage.input_tokens;
                 self.usage.output_tokens += end.usage.output_tokens;
             }
-            _ => {}
+            Event::Error(_) => {}
         }
         self.transcript.apply(event);
     }
@@ -315,9 +364,10 @@ fn event_session(event: &Event) -> &str {
 mod tests {
     use super::*;
     use crate::protocol::{
-        Decision, JsonRpc, Notification, PermissionRequest, SessionPermitParams, StopReason,
-        ToolCall, ToolResult, TurnDelta, TurnEnd,
+        Decision, JsonRpc, Notification, PermissionRequest, SessionOpenParams, SessionPermitParams,
+        StopReason, ToolCall, ToolResult, TurnDelta, TurnEnd,
     };
+    use crate::start::Start;
     use crate::tui::transcript::Block;
     use serde_json::json;
 
@@ -362,13 +412,20 @@ mod tests {
         }));
     }
 
+    fn new_app() -> App {
+        App::new(Start::Open {
+            cwd: "/p".into(),
+            model: None,
+        })
+    }
+
     fn session_json(id: &str) -> Value {
         json!({"id": id, "cwd": "/p", "model": "m-1", "updated_at": "2026-01-01T00:00:00Z"})
     }
 
     /// An app whose session `s_1` is open, with the open sent as id 1.
     fn opened() -> App {
-        let mut app = App::new("/p".into(), None);
+        let mut app = new_app();
         let open = app.open_call();
         app.sent(1, &open);
         respond(&mut app, 1, session_json("s_1"));
@@ -401,7 +458,10 @@ mod tests {
 
     #[test]
     fn opens_a_session_in_the_cwd_with_the_chosen_model() {
-        let app = App::new("/p".into(), Some("m-2".into()));
+        let app = App::new(Start::Open {
+            cwd: "/p".into(),
+            model: Some("m-2".into()),
+        });
 
         assert_eq!(
             app.open_call(),
@@ -410,6 +470,85 @@ mod tests {
                 model: Some("m-2".into()),
             })
         );
+    }
+
+    #[test]
+    fn resumes_a_session_by_id() {
+        let app = App::new(Start::Resume { id: "s_9".into() });
+
+        assert_eq!(
+            app.open_call(),
+            Call::SessionResume(SessionIdParams { id: "s_9".into() })
+        );
+    }
+
+    #[test]
+    fn an_initial_prompt_is_sent_once_the_session_opens() {
+        let mut app = new_app().with_prompt("fix it".into());
+        let open = app.open_call();
+        app.sent(1, &open);
+
+        let call = app.on_message(ServerMessage::Response(Response {
+            jsonrpc: JsonRpc::V2,
+            id: Some(1),
+            outcome: Outcome::Result(session_json("s_1")),
+        }));
+
+        assert_eq!(
+            call,
+            Some(Call::SessionSend(SessionSendParams {
+                id: "s_1".into(),
+                text: "fix it".into(),
+            }))
+        );
+        assert!(app.running);
+        assert_eq!(blocks(&app), [Block::User("fix it".into())]);
+    }
+
+    #[test]
+    fn the_initial_prompt_is_not_sent_again_after_a_reconnect() {
+        let mut app = new_app().with_prompt("fix it".into());
+        let open = app.open_call();
+        app.sent(1, &open);
+        respond(&mut app, 1, session_json("s_1"));
+
+        let resume = app.on_reconnected();
+        app.sent(0, &resume);
+        let call = app.on_message(ServerMessage::Response(Response {
+            jsonrpc: JsonRpc::V2,
+            id: Some(0),
+            outcome: Outcome::Result(session_json("s_1")),
+        }));
+
+        assert_eq!(call, None);
+    }
+
+    #[test]
+    fn a_read_only_app_neither_sends_nor_cancels() {
+        let mut app = App::new(Start::Resume { id: "s_1".into() }).read_only();
+        let resume = app.open_call();
+        app.sent(1, &resume);
+        respond(&mut app, 1, session_json("s_1"));
+        notify(&mut app, delta("s_1", "working"));
+
+        type_text(&mut app, "hi");
+        assert_eq!(app.input.text(), "");
+        assert_eq!(app.on_key(key(KeyCode::Enter)), None);
+        assert_eq!(app.on_key(key(KeyCode::Esc)), None);
+        assert_eq!(blocks(&app), [Block::Assistant("working".into())]);
+
+        app.on_key(ctrl('c'));
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn events_of_a_turn_this_app_did_not_start_mark_it_running() {
+        let mut app = opened();
+        notify(&mut app, delta("s_1", "from elsewhere"));
+        assert!(app.running);
+
+        notify(&mut app, end(StopReason::Completed, 1, 1));
+        assert!(!app.running);
     }
 
     #[test]
@@ -422,7 +561,7 @@ mod tests {
 
     #[test]
     fn a_failed_open_is_shown() {
-        let mut app = App::new("/p".into(), None);
+        let mut app = new_app();
         let open = app.open_call();
         app.sent(1, &open);
         respond_error(&mut app, 1, -32602, "cwd must be absolute");
@@ -457,7 +596,7 @@ mod tests {
 
     #[test]
     fn enter_does_nothing_before_the_session_is_open() {
-        let mut app = App::new("/p".into(), None);
+        let mut app = new_app();
         type_text(&mut app, "hi");
 
         assert_eq!(app.on_key(key(KeyCode::Enter)), None);
@@ -635,7 +774,7 @@ mod tests {
 
     #[test]
     fn reconnecting_before_the_open_was_answered_opens_again() {
-        let mut app = App::new("/p".into(), None);
+        let mut app = new_app();
         let open = app.open_call();
         app.sent(1, &open);
 

@@ -33,6 +33,7 @@ defmodule Sadld.Protocol do
     "session.send" => [id: :string, text: :string],
     "session.cancel" => [id: :string],
     "session.permit" => [id: :string, call_id: :string, decision: {:enum, ["allow", "deny"]}],
+    "session.compact" => [id: :string],
     "session.list" => []
   }
 
@@ -43,6 +44,7 @@ defmodule Sadld.Protocol do
     "session.send" => [turn_id: :string],
     "session.cancel" => [],
     "session.permit" => [],
+    "session.compact" => [turn_id: :string],
     "session.list" => [sessions: {:list, @session_info}]
   }
 
@@ -69,6 +71,7 @@ defmodule Sadld.Protocol do
       stop_reason: {:enum, ["completed", "cancelled", "error"]},
       usage: [input_tokens: :integer, output_tokens: :integer]
     ],
+    "turn.compacted" => [session_id: :string, turn_id: :string, summary: :string],
     "error" => [session_id: :string, code: :integer, message: :string]
   }
 

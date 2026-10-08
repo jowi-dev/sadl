@@ -89,6 +89,8 @@ in one long-lived server.
   from committed config. The provider is a behaviour so Anthropic and
   others can be added later.
 - SQLite-backed sessions with resume.
+- Context compaction by summary, automatic near the context window and
+  manual with `/compact` (ADR-0003).
 - Driven by hand first. `tm` integration comes after the tool proves itself.
 
 ## Integration with tm (later)
@@ -105,5 +107,4 @@ deploying bash hooks into every worktree.
 
 1. **Server lifecycle:** auto-started by the client, a systemd user unit, or
    both. MVP default: client auto-start (zero config).
-2. **Compaction strategy** once conversations outgrow the model's context.
-3. **Server naming:** `sadld` for now; `stable` is on the table.
+2. **Server naming:** `sadld` for now; `stable` is on the table.

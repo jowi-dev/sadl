@@ -561,6 +561,181 @@ defmodule Sadld.SessionTest do
     end
   end
 
+  describe "compaction" do
+    # A small window: compaction is needed once the context passes 80 tokens.
+    @small_window [context_window: 100, reserve_tokens: 20, keep_recent_tokens: 1]
+
+    # Answers summary requests with `summary` and everything else with
+    # `reply`, telling the test what each request held.
+    defp compacting_provider(summary, reply_usage) do
+      test_pid = self()
+
+      {StubProvider,
+       respond: fn messages, on_text, opts ->
+         if opts[:system] =~ "summarization" do
+           send(test_pid, {:summarize, messages})
+           summary.()
+         else
+           send(test_pid, {:chat, messages})
+           on_text.("ok")
+           {:ok, %{text: "ok", tool_calls: [], usage: reply_usage}}
+         end
+       end}
+    end
+
+    defp summary(text), do: fn -> {:ok, %{text: text, tool_calls: [], usage: @usage}} end
+
+    defp start_compacting_session(provider, compaction) do
+      {:ok, id} =
+        Session.start(
+          cwd: "/tmp/project",
+          model: "stub-model",
+          system_prompt: "sys",
+          provider: provider,
+          tools: {StubTools, run: fn _call, _cwd -> {:ok, "ok"} end},
+          compaction: compaction
+        )
+
+      :ok = SessionEvents.subscribe(id)
+      id
+    end
+
+    defp turn(id, text) do
+      {:ok, turn_id} = Session.send_message(id, text)
+      {turn_id, collect_turn(turn_id)}
+    end
+
+    test "a turn nearing the context limit summarizes older messages first" do
+      provider = compacting_provider(summary("S"), %{input_tokens: 90, output_tokens: 5})
+      id = start_compacting_session(provider, @small_window)
+
+      turn(id, "first")
+      assert_receive {:chat, [%{content: "first"}]}
+      refute_received {:summarize, _}
+
+      {turn_id, notifications} = turn(id, "second")
+
+      assert_receive {:summarize, [%{role: :user, content: prompt}]}
+      assert prompt =~ "first"
+      refute prompt =~ "second"
+
+      assert_receive {:chat, [%{role: :user, content: summary}, %{content: "second"}]}
+      assert summary =~ "S"
+
+      assert [
+               %Notification{method: "turn.compacted", params: compacted},
+               %Notification{method: "turn.delta"},
+               %Notification{method: "turn.end", params: %{usage: usage}}
+             ] = notifications
+
+      assert compacted == %{session_id: id, turn_id: turn_id, summary: "S"}
+      assert usage == %{input_tokens: 93, output_tokens: 7}
+
+      assert length(Session.messages(id)) == 4
+      assert Store.messages(id) == Session.messages(id)
+      assert Store.latest_compaction(id) == %{summary: "S", first_kept: 2}
+    end
+
+    test "a context within the limit is sent whole" do
+      provider = compacting_provider(summary("S"), @usage)
+      id = start_compacting_session(provider, [])
+
+      turn(id, "first")
+      turn(id, "second")
+
+      assert_receive {:chat, [_, _, %{content: "second"}]}
+      refute_received {:summarize, _}
+    end
+
+    test "a failed summary fails the turn" do
+      provider =
+        compacting_provider(fn -> {:error, :boom} end, %{input_tokens: 90, output_tokens: 5})
+
+      id = start_compacting_session(provider, @small_window)
+      turn(id, "first")
+
+      {_turn_id, notifications} = turn(id, "second")
+
+      assert [
+               %Notification{method: "error"},
+               %Notification{method: "turn.end", params: %{stop_reason: "error"}}
+             ] = notifications
+
+      assert Store.latest_compaction(id) == nil
+    end
+
+    test "a resumed session sends the compacted context" do
+      provider = compacting_provider(summary("S"), %{input_tokens: 90, output_tokens: 5})
+      id = start_compacting_session(provider, @small_window)
+      turn(id, "first")
+      turn(id, "second")
+      stop_session(id)
+
+      provider = compacting_provider(summary("S2"), @usage)
+      {:ok, _info} = Session.resume(id, provider: provider, tools: {StubTools, run: nil})
+      turn(id, "third")
+
+      assert_receive {:chat,
+                      [%{content: summary}, %{content: "second"}, _ok, %{content: "third"}]}
+
+      assert summary =~ "S"
+    end
+
+    test "compact summarizes the conversation now, as a turn of its own" do
+      provider = compacting_provider(summary("all of it"), @usage)
+      id = start_compacting_session(provider, [])
+      turn(id, "first")
+
+      assert {:ok, turn_id} = Session.compact(id)
+
+      assert [
+               %Notification{method: "turn.compacted", params: %{summary: "all of it"}},
+               %Notification{method: "turn.end", params: turn_end}
+             ] = collect_turn(turn_id)
+
+      assert turn_end.stop_reason == "completed"
+      assert turn_end.usage == @usage
+      assert Store.latest_compaction(id) == %{summary: "all of it", first_kept: 2}
+
+      turn(id, "next")
+      assert_receive {:chat, [%{content: summary}, %{content: "next"}]}
+      assert summary =~ "all of it"
+    end
+
+    test "compact with nothing new to summarize just ends the turn" do
+      provider = compacting_provider(summary("S"), @usage)
+      id = start_compacting_session(provider, [])
+
+      {:ok, turn_id} = Session.compact(id)
+
+      assert [%Notification{method: "turn.end", params: %{stop_reason: "completed"}}] =
+               collect_turn(turn_id)
+
+      refute_received {:summarize, _}
+    end
+
+    test "compact is refused while a turn runs, and on an unknown session" do
+      test_pid = self()
+
+      provider =
+        {StubProvider,
+         respond: fn _messages ->
+           send(test_pid, :called)
+
+           receive do
+             :release -> reply("late")
+           end
+         end}
+
+      id = start_compacting_session(provider, [])
+      {:ok, _turn_id} = Session.send_message(id, "hi")
+      assert_receive :called
+
+      assert Session.compact(id) == {:error, :busy}
+      assert Session.compact("missing") == {:error, :not_found}
+    end
+  end
+
   describe "system prompt" do
     defp start_echo_session(opts) do
       {:ok, id} =

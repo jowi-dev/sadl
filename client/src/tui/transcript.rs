@@ -104,6 +104,9 @@ impl Transcript {
                     self.push_notice("turn cancelled");
                 }
             }
+            Event::TurnCompacted(_) => {
+                self.push_notice("older messages were summarized to save context");
+            }
             Event::Error(error) => {
                 self.push_notice(&format!("error {}: {}", error.code, error.message));
             }
@@ -172,7 +175,7 @@ fn truncate(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::protocol::{
-        SessionError, StopReason, ToolCall, ToolResult, TurnDelta, TurnEnd, Usage,
+        SessionError, StopReason, ToolCall, ToolResult, TurnCompacted, TurnDelta, TurnEnd, Usage,
     };
     use serde_json::{Map, json};
 
@@ -307,6 +310,23 @@ mod tests {
                 Block::Notice("error -32010: provider down".into()),
                 Block::Notice("turn cancelled".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn a_compaction_becomes_a_notice() {
+        let mut transcript = Transcript::new(1024);
+        transcript.apply(&Event::TurnCompacted(TurnCompacted {
+            session_id: "s_1".into(),
+            turn_id: "t_1".into(),
+            summary: "## Goal\nship it".into(),
+        }));
+
+        assert_eq!(
+            blocks(&transcript),
+            [Block::Notice(
+                "older messages were summarized to save context".into()
+            )]
         );
     }
 

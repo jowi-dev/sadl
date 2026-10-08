@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "method": "turn.compacted", "params": {"session_id": "s_01", "turn_id": "t_02", "summary": "## Goal\nFix the failing parser test."}}

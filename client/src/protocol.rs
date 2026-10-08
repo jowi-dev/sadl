@@ -45,6 +45,8 @@ pub enum Call {
     SessionCancel(SessionIdParams),
     #[serde(rename = "session.permit")]
     SessionPermit(SessionPermitParams),
+    #[serde(rename = "session.compact")]
+    SessionCompact(SessionIdParams),
     #[serde(rename = "session.list")]
     SessionList(SessionListParams),
 }
@@ -62,7 +64,7 @@ pub struct SessionOpenParams {
     pub model: Option<String>,
 }
 
-/// Params of `session.resume` and `session.cancel`.
+/// Params of `session.resume`, `session.cancel` and `session.compact`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionIdParams {
     pub id: String,
@@ -137,6 +139,7 @@ pub struct SessionInfo {
     pub updated_at: String,
 }
 
+/// Result of `session.send` and `session.compact`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSendResult {
     pub turn_id: String,
@@ -175,6 +178,8 @@ pub enum Event {
     ToolResult(ToolResult),
     #[serde(rename = "turn.end")]
     TurnEnd(TurnEnd),
+    #[serde(rename = "turn.compacted")]
+    TurnCompacted(TurnCompacted),
     #[serde(rename = "error")]
     Error(SessionError),
 }
@@ -234,6 +239,15 @@ pub enum StopReason {
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+}
+
+/// The session's older messages were replaced by `summary` in what is sent
+/// to the model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnCompacted {
+    pub session_id: String,
+    pub turn_id: String,
+    pub summary: String,
 }
 
 /// Params of the `error` notification.

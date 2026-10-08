@@ -19,6 +19,9 @@ use serde_json::Value;
 /// to keep an idle client well under its 50 MB RSS budget.
 pub const MAX_TRANSCRIPT_BYTES: usize = 8 * 1024 * 1024;
 
+/// Typed on its own, compacts the session's context instead of sending.
+const COMPACT_COMMAND: &str = "/compact";
+
 /// Lines scrolled per PageUp/PageDown when the view height is unknown.
 const DEFAULT_PAGE: usize = 10;
 
@@ -28,6 +31,7 @@ enum Pending {
     Open,
     Resume,
     Send,
+    Compact,
     Cancel,
     Permit,
     Other,
@@ -114,6 +118,7 @@ impl App {
             Call::SessionSend(_) => Pending::Send,
             Call::SessionCancel(_) => Pending::Cancel,
             Call::SessionPermit(_) => Pending::Permit,
+            Call::SessionCompact(_) => Pending::Compact,
             Call::Handshake(_) | Call::SessionList(_) => Pending::Other,
         };
         self.pending.insert(id, pending);
@@ -121,7 +126,8 @@ impl App {
 
     /// Handles a key press, returning the request it triggers, if any.
     ///
-    /// Enter sends the prompt; Alt+Enter, Shift+Enter or Ctrl+J insert a
+    /// Enter sends the prompt, or compacts the session when the prompt is
+    /// just `/compact`; Alt+Enter, Shift+Enter or Ctrl+J insert a
     /// newline. Esc cancels the running turn. Ctrl+O expands or collapses
     /// tool blocks. PageUp/PageDown scroll the transcript. Ctrl+C clears the
     /// input, or quits when it is already empty. A read-only app ignores
@@ -245,6 +251,13 @@ impl App {
             return None;
         }
         let text = self.input.take();
+        if text.trim() == COMPACT_COMMAND {
+            let id = self.session.as_ref()?.id.clone();
+            self.running = true;
+            self.scroll = 0;
+            self.transcript.push_notice("compacting…");
+            return Some(Call::SessionCompact(SessionIdParams { id }));
+        }
         self.send_text(text)
     }
 
@@ -298,6 +311,10 @@ impl App {
                 self.running = false;
                 self.notice_error("cannot send", &error);
             }
+            (Pending::Compact, Outcome::Error(error)) => {
+                self.running = false;
+                self.notice_error("cannot compact", &error);
+            }
             (Pending::Cancel, Outcome::Error(error)) => {
                 self.notice_error("cannot cancel", &error);
             }
@@ -325,7 +342,9 @@ impl App {
                     self.asking = Some(request.call_id.clone());
                 }
             }
-            Event::TurnDelta(_) | Event::ToolCall(_) => self.running = true,
+            Event::TurnDelta(_) | Event::ToolCall(_) | Event::TurnCompacted(_) => {
+                self.running = true
+            }
             Event::ToolResult(result) => {
                 self.running = true;
                 if self.asking.as_ref() == Some(&result.call_id) {
@@ -356,6 +375,7 @@ fn event_session(event: &Event) -> &str {
         Event::PermissionRequest(e) => &e.session_id,
         Event::ToolResult(e) => &e.session_id,
         Event::TurnEnd(e) => &e.session_id,
+        Event::TurnCompacted(e) => &e.session_id,
         Event::Error(e) => &e.session_id,
     }
 }
@@ -627,6 +647,39 @@ mod tests {
 
         assert_eq!(app.input.text(), "a\nb\nc");
         assert!(!app.running);
+    }
+
+    #[test]
+    fn slash_compact_compacts_the_session_instead_of_sending() {
+        let mut app = opened();
+        type_text(&mut app, " /compact ");
+
+        let call = app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            call,
+            Some(Call::SessionCompact(SessionIdParams { id: "s_1".into() }))
+        );
+        assert!(app.running);
+        assert_eq!(app.input.text(), "");
+        assert_eq!(blocks(&app), [Block::Notice("compacting…".into())]);
+    }
+
+    #[test]
+    fn a_rejected_compact_ends_the_turn_with_a_notice() {
+        let mut app = opened();
+        type_text(&mut app, "/compact");
+        let call = app.on_key(key(KeyCode::Enter)).unwrap();
+        app.sent(2, &call);
+        respond_error(&mut app, 2, -32003, "session busy");
+
+        assert!(!app.running);
+        assert_eq!(
+            blocks(&app).last(),
+            Some(&Block::Notice(
+                "cannot compact (-32003): session busy".into()
+            ))
+        );
     }
 
     #[test]

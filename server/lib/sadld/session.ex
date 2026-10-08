@@ -14,16 +14,25 @@ defmodule Sadld.Session do
   every subscriber receives
   `{:session_event, session_id, %Sadld.Protocol.Notification{}}` messages:
   the `turn.delta`, `tool.call`, `permission.request`, `tool.result`,
-  `turn.end` and `error` notifications of `docs/protocol.md`, in order. All
-  of them are sent by the session process, so a subscriber that also made
-  the `send_message/2` call gets the reply before the turn's first
-  notification.
+  `turn.compacted`, `turn.end` and `error` notifications of
+  `docs/protocol.md`, in order. All of them are sent by the session
+  process, so a subscriber that also made the `send_message/2` call gets the
+  reply before the turn's first notification.
 
   Each tool call is checked against the session's `Sadld.Permissions`
   policy before it runs. A denied call fails with an error result the model
   reads. A call the policy asks about is broadcast as `permission.request`
   and waits, with the rest of the turn, until `permit/3` answers it or the
   turn is cancelled.
+
+  Before each request to the provider, a turn checks whether the context
+  is near the model's limit and, if so, compacts it with
+  `Sadld.Compaction` first. `compact/1` does the same on demand. A
+  compaction changes only what is sent: the message list and the store keep
+  every message, and the latest compaction is stored beside them and
+  reloaded when the session starts. The context's size is the provider's
+  reported usage for the last request plus an estimate of the messages
+  since, or an estimate of the whole context when there is no report yet.
 
   A turn appends to the message list only at consistent points: the user
   message when it starts, then each assistant reply together with the
@@ -40,7 +49,7 @@ defmodule Sadld.Session do
   use GenServer, restart: :transient
 
   alias Sadld.Protocol.Notification
-  alias Sadld.{Permissions, SessionEvents, Store}
+  alias Sadld.{Compaction, Permissions, SessionEvents, Store}
 
   @registry Sadld.SessionRegistry
   @supervisor Sadld.SessionSupervisor
@@ -70,6 +79,7 @@ defmodule Sadld.Session do
     * `:system_prompt` - system prompt passed to the provider as `:system`
       (default `Sadld.SystemPrompt.build/1` of `:cwd`, built once at start
       so later edits to context files reach only new sessions)
+    * `:compaction` - options for `Sadld.Compaction`, over its app config
   """
   @spec start(keyword()) :: {:ok, id()} | {:error, term()}
   def start(opts) do
@@ -88,7 +98,8 @@ defmodule Sadld.Session do
   is not running is started with its stored `:cwd` and `:model` and its
   stored messages; one already running is left as it is.
 
-  Takes the `:provider`, `:tools` and `:permissions` options of `start/1`.
+  Takes the `:provider`, `:tools`, `:permissions` and `:compaction` options
+  of `start/1`.
   """
   @spec resume(id(), keyword()) :: {:ok, Store.session_info()} | {:error, :not_found | term()}
   def resume(id, opts) do
@@ -145,6 +156,15 @@ defmodule Sadld.Session do
   def permit(id, call_id, decision) when decision in [:allow, :deny],
     do: call(id, {:permit, call_id, decision})
 
+  @doc """
+  Starts a turn that compacts the session's context now and returns its
+  turn id. It summarizes everything but the recent tail, or the whole
+  conversation when the tail is all there is; with nothing new to
+  summarize it just ends. Fails with `:busy` while another turn is running.
+  """
+  @spec compact(id()) :: {:ok, String.t()} | {:error, :busy | :not_found}
+  def compact(id), do: call(id, :compact)
+
   @doc "Returns the session's message list, oldest first."
   @spec messages(id()) :: [Sadld.Provider.message()] | {:error, :not_found}
   def messages(id), do: call(id, :messages)
@@ -188,7 +208,10 @@ defmodule Sadld.Session do
       provider: {provider, provider_opts},
       tools: Keyword.fetch!(opts, :tools),
       permissions: Keyword.get_lazy(opts, :permissions, &Permissions.allow_all/0),
+      compaction_opts: Keyword.get(opts, :compaction, []),
       messages: Store.messages(id),
+      compaction: Store.latest_compaction(id),
+      context_tokens: nil,
       updated_at: now(),
       turn: nil
     }
@@ -201,10 +224,19 @@ defmodule Sadld.Session do
     {:reply, {:error, :busy}, state}
   end
 
+  def handle_call(:compact, _from, %{turn: turn} = state) when turn != nil do
+    {:reply, {:error, :busy}, state}
+  end
+
   def handle_call({:send_message, text}, _from, state) do
     turn_id = new_id()
     state = append_messages(state, [%{role: :user, content: text}])
-    {:reply, {:ok, turn_id}, state, {:continue, {:start_turn, turn_id}}}
+    {:reply, {:ok, turn_id}, state, {:continue, {:start_turn, turn_id, :chat}}}
+  end
+
+  def handle_call(:compact, _from, state) do
+    turn_id = new_id()
+    {:reply, {:ok, turn_id}, state, {:continue, {:start_turn, turn_id, :compact}}}
   end
 
   def handle_call(:cancel, _from, %{turn: nil} = state), do: {:reply, :ok, state}
@@ -230,14 +262,26 @@ defmodule Sadld.Session do
   end
 
   @impl true
-  def handle_continue({:start_turn, turn_id}, state) do
+  def handle_continue({:start_turn, turn_id, job}, state) do
     session = self()
-    context = Map.take(state, [:cwd, :provider, :tools, :permissions])
+    ctx = Map.take(state, [:messages, :compaction, :context_tokens])
+
+    env = %{
+      cwd: state.cwd,
+      provider: state.provider,
+      tools: state.tools,
+      permissions: state.permissions,
+      compaction: state.compaction_opts
+    }
 
     task =
       Task.Supervisor.async_nolink(@task_supervisor, fn ->
         report = &send(session, {:turn, turn_id, &1})
-        run_turn(state.messages, Map.put(context, :report, report))
+
+        case job do
+          :chat -> run_turn(ctx, env, report)
+          :compact -> run_compact(ctx, env, report)
+        end
       end)
 
     turn = %{id: turn_id, task: task, usage: @zero_usage, asks: MapSet.new()}
@@ -278,7 +322,15 @@ defmodule Sadld.Session do
 
   defp handle_turn_event({:step, messages, usage}, state) do
     turn = %{state.turn | usage: add_usage(state.turn.usage, usage)}
-    %{append_messages(state, messages) | turn: turn}
+    :ok = Store.append_messages(state.id, messages)
+    %{add_step(state, messages, usage) | turn: turn, updated_at: now()}
+  end
+
+  defp handle_turn_event({:compacted, compaction, usage}, state) do
+    :ok = Store.add_compaction(state.id, compaction)
+    notify(state, "turn.compacted", %{turn_id: state.turn.id, summary: compaction.summary})
+    turn = %{state.turn | usage: add_usage(state.turn.usage, usage)}
+    %{state | compaction: compaction, context_tokens: nil, turn: turn}
   end
 
   defp append_messages(state, messages) do
@@ -310,20 +362,75 @@ defmodule Sadld.Session do
     }
   end
 
-  # The turn loop, run inside the turn task. `context.report` sends an
-  # event to the session. Returns `:completed` or `{:error, reason}`.
-  defp run_turn(messages, %{provider: {provider, provider_opts}, report: report} = context) do
+  # Adds a step's messages to `ctx` (the session state, or the turn task's
+  # copy of it). The provider's usage for the step's request, plus its reply,
+  # is the size of the context up to and including the reply; the tool
+  # results after it are estimated when the size is next needed.
+  defp add_step(ctx, step, usage) do
+    context_tokens =
+      if usage.input_tokens > 0,
+        do: %{tokens: usage.input_tokens + usage.output_tokens, at: length(ctx.messages) + 1},
+        else: nil
+
+    %{ctx | messages: ctx.messages ++ step, context_tokens: context_tokens}
+  end
+
+  # The tokens the next request would send: the last reported size plus an
+  # estimate of what came after it, or an estimate of the whole context when
+  # there is no reported size since the session started or last compacted.
+  defp context_size(%{context_tokens: %{tokens: tokens, at: at}} = ctx, _env),
+    do: tokens + Compaction.estimate_tokens(Enum.drop(ctx.messages, at))
+
+  defp context_size(ctx, %{provider: {_provider, provider_opts}}) do
+    system = Keyword.get(provider_opts, :system) || ""
+    context = Compaction.context(ctx.messages, ctx.compaction)
+    Compaction.estimate_tokens(system) + Compaction.estimate_tokens(context)
+  end
+
+  # The turn loop, run inside the turn task. `report` sends an event to the
+  # session. Before each request it compacts the context if that is near
+  # the limit. Returns `:completed` or `{:error, reason}`.
+  defp run_turn(ctx, env, report) do
+    with {:ok, ctx} <- maybe_compact(ctx, env, report),
+         {:ok, reply} <- request(ctx, env, report) do
+      %{text: text, tool_calls: tool_calls, usage: usage} = reply
+      results = Enum.map(tool_calls, &run_tool(&1, Map.put(env, :report, report)))
+      step = [%{role: :assistant, content: text, tool_calls: tool_calls} | results]
+      report.({:step, step, usage})
+
+      if tool_calls == [],
+        do: :completed,
+        else: run_turn(add_step(ctx, step, usage), env, report)
+    end
+  end
+
+  defp request(ctx, %{provider: {provider, provider_opts}}, report) do
     on_text = &report.({:notify, "turn.delta", %{text: &1}})
+    messages = Compaction.context(ctx.messages, ctx.compaction)
+    provider.chat(messages, Keyword.put(provider_opts, :on_text, on_text))
+  end
 
-    case provider.chat(messages, Keyword.put(provider_opts, :on_text, on_text)) do
-      {:ok, %{text: text, tool_calls: tool_calls, usage: usage}} ->
-        results = Enum.map(tool_calls, &run_tool(&1, context))
-        step = [%{role: :assistant, content: text, tool_calls: tool_calls} | results]
-        report.({:step, step, usage})
+  # A `compact/1` turn: summarizes everything but the recent tail, or the
+  # whole conversation when the tail is all there is.
+  defp run_compact(ctx, env, report) do
+    with {:ok, _ctx} <- compact(ctx, env, report, [force: true] ++ env.compaction),
+         do: :completed
+  end
 
-        if tool_calls == [],
-          do: :completed,
-          else: run_turn(messages ++ step, context)
+  defp maybe_compact(ctx, env, report) do
+    if Compaction.needed?(context_size(ctx, env), env.compaction),
+      do: compact(ctx, env, report, env.compaction),
+      else: {:ok, ctx}
+  end
+
+  defp compact(ctx, env, report, opts) do
+    case Compaction.compact(ctx.messages, ctx.compaction, env.provider, opts) do
+      {:ok, compaction, usage} ->
+        report.({:compacted, compaction, usage})
+        {:ok, %{ctx | compaction: compaction, context_tokens: nil}}
+
+      :noop ->
+        {:ok, ctx}
 
       {:error, reason} ->
         {:error, reason}

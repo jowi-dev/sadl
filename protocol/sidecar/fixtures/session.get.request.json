@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "id": 0, "method": "session.get", "params": {"path": {"id": "s_1"}}}

@@ -13,6 +13,9 @@ defmodule Sadld.Application do
         {Registry, keys: :unique, name: Sadld.SessionRegistry},
         Sadld.SessionEvents,
         {Task.Supervisor, name: Sadld.TurnSupervisor},
+        {Task.Supervisor, name: Sadld.PluginTaskSupervisor},
+        {Registry, keys: :unique, name: Sadld.PluginRegistry},
+        {DynamicSupervisor, name: Sadld.PluginSupervisor, strategy: :one_for_one},
         {DynamicSupervisor, name: Sadld.SessionSupervisor, strategy: :one_for_one}
       ] ++ listener_children()
 

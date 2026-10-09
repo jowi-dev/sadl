@@ -15,10 +15,13 @@ defmodule Sadld.Provider do
 
   @typedoc """
   A conversation entry. Assistant entries carry the tool calls they made;
-  each call is answered by a `:tool` entry with the same `call_id`.
+  each call is answered by a `:tool` entry with the same `call_id`. A user
+  entry marked `synthetic` was injected by a plugin rather than typed; the
+  model reads it like any other.
   """
   @type message ::
           %{role: :user, content: String.t()}
+          | %{role: :user, content: String.t(), synthetic: true}
           | %{role: :assistant, content: String.t(), tool_calls: [tool_call()]}
           | %{role: :tool, call_id: String.t(), content: String.t(), is_error: boolean()}
 

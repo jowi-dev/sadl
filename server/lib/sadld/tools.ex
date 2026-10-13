@@ -1,6 +1,6 @@
 defmodule Sadld.Tools do
   @moduledoc """
-  The built-in tools: `read`, `write` and `edit`. A `Sadld.ToolRunner` that
+  The built-in tools: `read`, `write`, `edit` and `skill`. A `Sadld.ToolRunner` that
   dispatches each call to the `Sadld.Tool` of the same name, and the source
   of the tool specs the provider shows the model.
 
@@ -10,7 +10,7 @@ defmodule Sadld.Tools do
 
   @behaviour Sadld.ToolRunner
 
-  @tools [Sadld.Tools.Read, Sadld.Tools.Write, Sadld.Tools.Edit]
+  @tools [Sadld.Tools.Read, Sadld.Tools.Write, Sadld.Tools.Edit, Sadld.Tools.Skill]
 
   @doc "Returns the spec of every tool, in a stable order."
   @spec specs() :: [Sadld.Tool.spec()]

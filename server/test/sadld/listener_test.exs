@@ -206,10 +206,15 @@ defmodule Sadld.ListenerTest do
         end
       end
 
+      commands = Path.join(Path.dirname(path), "commands")
+      File.mkdir_p!(Path.join(commands, "command/thatch"))
+      File.write!(Path.join(commands, "command/thatch/compact.md"), "Wrap up: $ARGUMENTS")
+
       session = [
         provider: {StubProvider, respond: respond},
         tools: {StubTools, run: fn _call, _cwd -> {:ok, "listing"} end},
         model: "stub-default",
+        command_dirs: [commands],
         permissions_path:
           write_policy(
             path,
@@ -327,6 +332,33 @@ defmodule Sadld.ListenerTest do
       %{"result" => _} = request(socket, send_request(3, id, "wait"))
       compact = %{fixture("session.compact.request.json") | "params" => %{"id" => id}}
       assert error_code(request(socket, compact)) == -32_003
+    end
+
+    test "runs a slash command as a turn on its expanded template", %{socket: socket} do
+      handshake(socket)
+      id = open(socket)
+      command = put_in(fixture("session.command.request.json"), ["params", "id"], id)
+
+      assert %{"id" => 6, "result" => %{"turn_id" => turn_id}} = request(socket, command)
+
+      assert [
+               %{"method" => "turn.delta", "params" => %{"turn_id" => ^turn_id} = delta},
+               %{"method" => "turn.end"}
+             ] = receive_turn(socket)
+
+      assert delta["text"] == "echo: Wrap up: keep the parser notes"
+    end
+
+    test "an unknown slash command answers command not found", %{socket: socket} do
+      handshake(socket)
+      id = open(socket)
+
+      command =
+        fixture("session.command.request.json")
+        |> put_in(["params", "id"], id)
+        |> put_in(["params", "command"], "nope")
+
+      assert request(socket, command) == fixture("session.command.response.not-found.json")
     end
 
     test "a running turn makes send busy until it is cancelled", %{socket: socket} do

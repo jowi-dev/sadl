@@ -40,7 +40,7 @@ fn roundtrip_fixture(method: &str, kind: &str, original: &Value) -> Value {
         ("response", "session.open" | "session.resume") => {
             roundtrip::<Response<SessionInfo>>(original)
         }
-        ("response", "session.send" | "session.compact") => {
+        ("response", "session.send" | "session.compact" | "session.command") => {
             roundtrip::<Response<SessionSendResult>>(original)
         }
         ("response", "session.cancel") => roundtrip::<Response<SessionCancelResult>>(original),

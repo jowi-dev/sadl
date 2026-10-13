@@ -17,7 +17,8 @@ defmodule Sadld.Sidecar do
   rather than retried. The plugin's own `client` calls are answered by
   `Sadld.Sidecar.Client`, each in a task under `Sadld.PluginTaskSupervisor`,
   so a call that waits on a session cannot block a hook that session is
-  waiting on.
+  waiting on. The plugin's TUI calls name no session, so they act on the
+  one the server last sent the plugin, in an event, a hook or a tool call.
 
   Options:
 
@@ -148,6 +149,7 @@ defmodule Sadld.Sidecar do
         next_id: 0,
         pending: %{},
         status: :loading,
+        session: nil,
         waiting: []
       }
 
@@ -189,18 +191,22 @@ defmodule Sadld.Sidecar do
 
   def handle_call({:request, "tool.execute", params}, from, state) do
     params = put_in(params, ["context", "worktree"], state.worktree)
+    state = heard_about(state, params["context"]["sessionID"])
     {:noreply, send_request(state, "tool.execute", params, {:call, from})}
   end
 
-  def handle_call({:request, method, params}, from, state),
-    do: {:noreply, send_request(state, method, params, {:call, from})}
+  def handle_call({:request, method, params}, from, state) do
+    state = heard_about(state, get_in(params, ["input", "sessionID"]))
+    {:noreply, send_request(state, method, params, {:call, from})}
+  end
 
   @impl GenServer
   def handle_cast({:event, _event}, %{status: {:failed, _reason}} = state), do: {:noreply, state}
 
-  def handle_cast({:event, event}, state) do
+  def handle_cast({:event, %{"properties" => properties} = event}, state) do
     write(state, {:notification, "event", %{"event" => event}})
-    {:noreply, state}
+    session = properties["sessionID"] || get_in(properties, ["info", "id"])
+    {:noreply, heard_about(state, session)}
   end
 
   @impl GenServer
@@ -294,12 +300,12 @@ defmodule Sadld.Sidecar do
   # Client calls are answered in tasks: see the module docs.
   defp answer(id, method, params, state) do
     server = self()
-    worktree = state.worktree
+    %{worktree: worktree, session: session} = state
 
     Task.Supervisor.start_child(Sadld.PluginTaskSupervisor, fn ->
       result =
         try do
-          Client.handle(method, params, worktree)
+          Client.handle(method, params, worktree, session)
         rescue
           error -> {:error, @internal_error, Exception.message(error)}
         end
@@ -307,6 +313,10 @@ defmodule Sadld.Sidecar do
       send(server, {:answer, id, result})
     end)
   end
+
+  # The session the plugin last heard about, which its TUI calls act on.
+  defp heard_about(state, session) when is_binary(session), do: %{state | session: session}
+  defp heard_about(state, _none), do: state
 
   defp send_request(state, method, params, waiter) do
     id = state.next_id

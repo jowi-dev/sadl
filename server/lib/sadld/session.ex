@@ -17,7 +17,8 @@ defmodule Sadld.Session do
   `turn.compacted`, `turn.end` and `error` notifications of
   `docs/protocol.md`, in order. All of them are sent by the session
   process, so a subscriber that also made the `send_message/2` call gets the
-  reply before the turn's first notification.
+  reply before the turn's first notification. `request_exit/1` broadcasts
+  `app.exit` the same way.
 
   Each tool call is checked against the session's `Sadld.Permissions`
   policy before it runs. A denied call fails with an error result the model
@@ -48,17 +49,18 @@ defmodule Sadld.Session do
   A session's `Sadld.Plugin`s extend it (ADR-0004). Their tools are offered
   to the model after the session's own, and calls to them run in the
   plugin. From the turn task, the session passes the system prompt through
-  them before each model call, the prompt when a turn starts (text they add
-  follows it as user messages of its own), and each tool result before the
-  model reads it. They hear `session.created` when a new session starts,
-  `session.status` busy and idle around each turn, `session.idle` after it
-  and `session.error` when it fails.
+  them before each model call, a slash command's expanded template before
+  it becomes the prompt (`command/4`), the prompt when a turn starts (text
+  they add follows it as user messages of its own), and each tool result
+  before the model reads it. They hear `session.created` when a new session
+  starts, `session.status` busy and idle around each turn, `session.idle`
+  after it and `session.error` when it fails.
   """
 
   use GenServer, restart: :transient
 
   alias Sadld.Protocol.Notification
-  alias Sadld.{Compaction, Permissions, Plugin, SessionEvents, Store}
+  alias Sadld.{Commands, Compaction, Permissions, Plugin, SessionEvents, Store}
 
   @registry Sadld.SessionRegistry
   @supervisor Sadld.SessionSupervisor
@@ -183,6 +185,37 @@ defmodule Sadld.Session do
   @spec compact(id()) :: {:ok, String.t()} | {:error, :busy | :not_found}
   def compact(id), do: call(id, :compact)
 
+  @doc """
+  Runs slash command `name` (`Sadld.Commands`) with `arguments`, the text
+  typed after it, and returns the id of the turn it starts. The turn first
+  passes the expanded template through the plugins' `command.execute.before`
+  hook, then records the result as the user message and carries on as a
+  `send_message/2` turn would. Fails with `:unknown_command` when there is
+  no such command and `:busy` while another turn is running.
+
+  Options:
+
+    * `:dirs` - the command directories (default `Sadld.Commands.dirs/0`)
+  """
+  @spec command(id(), String.t(), String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, :busy | :not_found | :unknown_command}
+  def command(id, name, arguments, opts \\ []) do
+    case Commands.fetch(name, Keyword.get_lazy(opts, :dirs, &Commands.dirs/0)) do
+      {:ok, template} ->
+        call(id, {:command, name, arguments, Commands.expand(template, arguments)})
+
+      :error ->
+        {:error, :unknown_command}
+    end
+  end
+
+  @doc """
+  Asks the clients showing the session to exit, with an `app.exit`
+  notification. The session itself keeps running.
+  """
+  @spec request_exit(id()) :: :ok | {:error, :not_found}
+  def request_exit(id), do: call(id, :request_exit)
+
   @doc "Returns the session's message list, oldest first."
   @spec messages(id()) :: [Sadld.Provider.message()] | {:error, :not_found}
   def messages(id), do: call(id, :messages)
@@ -271,6 +304,17 @@ defmodule Sadld.Session do
     end
   end
 
+  def handle_call({:command, _name, _arguments, _text}, _from, %{turn: turn} = state)
+      when turn != nil do
+    {:reply, {:error, :busy}, state}
+  end
+
+  def handle_call({:command, name, arguments, text}, _from, state) do
+    turn_id = new_id()
+    job = {:command, name, arguments, text}
+    {:reply, {:ok, turn_id}, state, {:continue, {:start_turn, turn_id, job}}}
+  end
+
   def handle_call(:compact, _from, %{turn: turn} = state) when turn != nil do
     {:reply, {:error, :busy}, state}
   end
@@ -294,6 +338,11 @@ defmodule Sadld.Session do
     else
       {:reply, {:error, :not_pending}, state}
     end
+  end
+
+  def handle_call(:request_exit, _from, state) do
+    notify(state, "app.exit", %{})
+    {:reply, :ok, state}
   end
 
   def handle_call(:messages, _from, state), do: {:reply, state.messages, state}
@@ -322,8 +371,14 @@ defmodule Sadld.Session do
         report = &send(session, {:turn, turn_id, &1})
 
         case job do
-          {:chat, prompt} -> run_turn(ctx, prompt, env, report)
-          :compact -> run_compact(ctx, env, report)
+          {:chat, prompt} ->
+            run_turn(ctx, prompt, env, report)
+
+          {:command, name, arguments, text} ->
+            run_command(ctx, {name, arguments, text}, env, report)
+
+          :compact ->
+            run_compact(ctx, env, report)
         end
       end)
 
@@ -362,6 +417,8 @@ defmodule Sadld.Session do
     notify(state, "permission.request", %{turn_id: turn.id, call_id: call_id})
     state
   end
+
+  defp handle_turn_event({:prompt, message}, state), do: append_messages(state, [message])
 
   defp handle_turn_event({:step, messages, usage}, state) do
     turn = %{state.turn | usage: add_usage(state.turn.usage, usage)}
@@ -469,6 +526,23 @@ defmodule Sadld.Session do
         report.({:step, added, @zero_usage})
         run_steps(add_step(ctx, added, @zero_usage), env, report)
     end
+  end
+
+  # A `command/4` turn: the plugins see the expanded command first, and
+  # the text parts they leave become the turn's prompt.
+  defp run_command(ctx, {name, arguments, text}, env, report) do
+    input = %{"command" => name, "sessionID" => env.id, "arguments" => arguments}
+    output = %{"parts" => [%{"type" => "text", "text" => text}]}
+
+    parts = Plugin.hook(env.plugins, "command.execute.before", input, output)["parts"]
+
+    texts =
+      for %{"type" => "text", "text" => text} when is_binary(text) <- List.wrap(parts), do: text
+
+    prompt = %{role: :user, content: Enum.join(texts, "\n\n")}
+
+    report.({:prompt, prompt})
+    run_turn(%{ctx | messages: ctx.messages ++ [prompt]}, prompt, env, report)
   end
 
   defp put_provider_opt(%{provider: {provider, opts}} = env, key, value),

@@ -18,6 +18,9 @@ defmodule Sadld.Plugin do
     * `"chat.message"` with `%{"sessionID", "messageID"}` and
       `%{"message", "parts"}` when a turn starts. Text parts a plugin
       appends become user messages after the prompt.
+    * `"command.execute.before"` with `%{"command", "sessionID",
+      "arguments"}` and `%{"parts"}` when a slash command's turn starts.
+      The text parts it leaves become the prompt.
     * `"tool.execute.after"` with `%{"tool", "sessionID", "callID", "args"}`
       and `%{"title", "output", "metadata"}` after each tool call. The
       `"output"` it leaves is what the model reads.

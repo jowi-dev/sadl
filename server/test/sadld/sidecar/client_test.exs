@@ -179,6 +179,60 @@ defmodule Sadld.Sidecar.ClientTest do
     assert log =~ "recalled 2 memories"
   end
 
+  describe "TUI commands act on the session the plugin last heard about" do
+    test "session_compact compacts it", %{tmp_dir: dir} do
+      id = start_session(dir)
+      {:ok, turn_id} = Session.send_message(id, "hi")
+      await_turn(turn_id)
+
+      for command <- ["session_compact", "session.compact"] do
+        params = %{"body" => %{"command" => command}}
+        assert Client.handle("tui.executeCommand", params, dir, id) == {:ok, true}
+
+        assert_receive {:session_event, ^id,
+                        %Notification{method: "turn.end", params: %{stop_reason: "completed"}}}
+      end
+    end
+
+    test "app.exit asks the clients showing it to exit", %{tmp_dir: dir} do
+      id = start_session(dir)
+      exit = %{"type" => "tui.command.execute", "properties" => %{"command" => "app.exit"}}
+
+      assert Client.handle("tui.publish", %{"body" => exit}, dir, id) == {:ok, true}
+      assert_receive {:session_event, ^id, %Notification{method: "app.exit", params: params}}
+      assert params == %{session_id: id}
+
+      params = %{"body" => %{"command" => "app_exit"}}
+      assert Client.handle("tui.executeCommand", params, dir, id) == {:ok, true}
+      assert_receive {:session_event, ^id, %Notification{method: "app.exit"}}
+    end
+
+    test "fail without a session or for other commands", %{tmp_dir: dir} do
+      compact = %{"body" => %{"command" => "session_compact"}}
+
+      assert Client.handle("tui.executeCommand", compact, dir) ==
+               {:error, -32_002, "session not found"}
+
+      assert Client.handle("tui.executeCommand", compact, dir, "missing") ==
+               {:error, -32_002, "session not found"}
+
+      id = start_session(dir)
+
+      assert Client.handle(
+               "tui.executeCommand",
+               %{"body" => %{"command" => "prompt.clear"}},
+               dir,
+               id
+             ) ==
+               {:error, -32_602, "unsupported TUI command prompt.clear"}
+
+      toast = %{"type" => "tui.toast.show", "properties" => %{"message" => "hi"}}
+
+      assert Client.handle("tui.publish", %{"body" => toast}, dir, id) ==
+               {:error, -32_602, "invalid params"}
+    end
+  end
+
   test "other methods and malformed params are refused", %{tmp_dir: dir} do
     assert Client.handle("session.create", %{"body" => %{}}, dir) ==
              {:error, -32_601, "method not found"}

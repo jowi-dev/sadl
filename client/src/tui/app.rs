@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::protocol::{
-    Call, Decision, ErrorObject, Event, Outcome, Response, ServerMessage, SessionIdParams,
-    SessionInfo, SessionPermitParams, SessionSendParams, Usage,
+    Call, Decision, ErrorObject, Event, Outcome, Response, ServerMessage, SessionCommandParams,
+    SessionIdParams, SessionInfo, SessionPermitParams, SessionSendParams, Usage,
 };
 use crate::start::Start;
 use crate::tui::input::Input;
@@ -22,16 +22,21 @@ pub const MAX_TRANSCRIPT_BYTES: usize = 8 * 1024 * 1024;
 /// Typed on its own, compacts the session's context instead of sending.
 const COMPACT_COMMAND: &str = "/compact";
 
+/// Starts a slash command the server runs, typed as `/name arguments`.
+const COMMAND_PREFIX: char = '/';
+
 /// Lines scrolled per PageUp/PageDown when the view height is unknown.
 const DEFAULT_PAGE: usize = 10;
 
 /// What a request this client sent was for, so its response can be handled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Pending {
     Open,
     Resume,
     Send,
     Compact,
+    /// A slash command, by name.
+    Command(String),
     Cancel,
     Permit,
     Other,
@@ -119,6 +124,7 @@ impl App {
             Call::SessionCancel(_) => Pending::Cancel,
             Call::SessionPermit(_) => Pending::Permit,
             Call::SessionCompact(_) => Pending::Compact,
+            Call::SessionCommand(params) => Pending::Command(params.command.clone()),
             Call::Handshake(_) | Call::SessionList(_) => Pending::Other,
         };
         self.pending.insert(id, pending);
@@ -127,7 +133,8 @@ impl App {
     /// Handles a key press, returning the request it triggers, if any.
     ///
     /// Enter sends the prompt, or compacts the session when the prompt is
-    /// just `/compact`; Alt+Enter, Shift+Enter or Ctrl+J insert a
+    /// just `/compact`, or has the server run slash command `name` when it
+    /// is `/name arguments`; Alt+Enter, Shift+Enter or Ctrl+J insert a
     /// newline. Esc cancels the running turn. Ctrl+O expands or collapses
     /// tool blocks. PageUp/PageDown scroll the transcript. Ctrl+C clears the
     /// input, or quits when it is already empty. A read-only app ignores
@@ -258,6 +265,17 @@ impl App {
             self.transcript.push_notice("compacting…");
             return Some(Call::SessionCompact(SessionIdParams { id }));
         }
+        if let Some((command, arguments)) = parse_command(&text) {
+            let id = self.session.as_ref()?.id.clone();
+            self.transcript.push_user(text.trim());
+            self.running = true;
+            self.scroll = 0;
+            return Some(Call::SessionCommand(SessionCommandParams {
+                id,
+                command,
+                arguments,
+            }));
+        }
         self.send_text(text)
     }
 
@@ -315,6 +333,10 @@ impl App {
                 self.running = false;
                 self.notice_error("cannot compact", &error);
             }
+            (Pending::Command(command), Outcome::Error(error)) => {
+                self.running = false;
+                self.notice_error(&format!("cannot run /{command}"), &error);
+            }
             (Pending::Cancel, Outcome::Error(error)) => {
                 self.notice_error("cannot cancel", &error);
             }
@@ -357,6 +379,7 @@ impl App {
                 self.usage.input_tokens += end.usage.input_tokens;
                 self.usage.output_tokens += end.usage.output_tokens;
             }
+            Event::AppExit(_) => self.quit = true,
             Event::Error(_) => {}
         }
         self.transcript.apply(event);
@@ -368,6 +391,17 @@ impl App {
     }
 }
 
+/// Splits `/name arguments` into the command's name and its arguments, or
+/// gives `None` for text that does not start with `/name`.
+fn parse_command(text: &str) -> Option<(String, String)> {
+    let rest = text.trim().strip_prefix(COMMAND_PREFIX)?;
+    let (name, arguments) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    if name.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), arguments.trim().to_string()))
+}
+
 fn event_session(event: &Event) -> &str {
     match event {
         Event::TurnDelta(e) => &e.session_id,
@@ -377,6 +411,7 @@ fn event_session(event: &Event) -> &str {
         Event::TurnEnd(e) => &e.session_id,
         Event::TurnCompacted(e) => &e.session_id,
         Event::Error(e) => &e.session_id,
+        Event::AppExit(e) => &e.session_id,
     }
 }
 
@@ -384,8 +419,9 @@ fn event_session(event: &Event) -> &str {
 mod tests {
     use super::*;
     use crate::protocol::{
-        Decision, JsonRpc, Notification, PermissionRequest, SessionOpenParams, SessionPermitParams,
-        StopReason, ToolCall, ToolResult, TurnDelta, TurnEnd,
+        AppExit, Decision, JsonRpc, Notification, PermissionRequest, SessionCommandParams,
+        SessionOpenParams, SessionPermitParams, StopReason, ToolCall, ToolResult, TurnDelta,
+        TurnEnd,
     };
     use crate::start::Start;
     use crate::tui::transcript::Block;
@@ -680,6 +716,75 @@ mod tests {
                 "cannot compact (-32003): session busy".into()
             ))
         );
+    }
+
+    #[test]
+    fn a_slash_command_runs_on_the_server_with_its_arguments() {
+        let mut app = opened();
+        type_text(&mut app, " /thatch/compact keep the  notes ");
+
+        let call = app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            call,
+            Some(Call::SessionCommand(SessionCommandParams {
+                id: "s_1".into(),
+                command: "thatch/compact".into(),
+                arguments: "keep the  notes".into(),
+            }))
+        );
+        assert!(app.running);
+        assert_eq!(
+            blocks(&app),
+            [Block::User("/thatch/compact keep the  notes".into())]
+        );
+    }
+
+    #[test]
+    fn a_lone_slash_is_sent_as_text() {
+        let mut app = opened();
+        type_text(&mut app, "/");
+
+        let call = app.on_key(key(KeyCode::Enter));
+
+        assert!(matches!(call, Some(Call::SessionSend(_))));
+    }
+
+    #[test]
+    fn a_rejected_command_ends_the_turn_with_a_notice() {
+        let mut app = opened();
+        type_text(&mut app, "/nope");
+        let call = app.on_key(key(KeyCode::Enter)).unwrap();
+        app.sent(2, &call);
+        respond_error(&mut app, 2, -32005, "command not found");
+
+        assert!(!app.running);
+        assert_eq!(
+            blocks(&app).last(),
+            Some(&Block::Notice(
+                "cannot run /nope (-32005): command not found".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn app_exit_for_the_session_quits() {
+        let mut app = opened();
+        notify(
+            &mut app,
+            Event::AppExit(AppExit {
+                session_id: "other".into(),
+            }),
+        );
+        assert!(!app.should_quit());
+
+        notify(
+            &mut app,
+            Event::AppExit(AppExit {
+                session_id: "s_1".into(),
+            }),
+        );
+        assert!(app.should_quit());
     }
 
     #[test]

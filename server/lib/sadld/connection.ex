@@ -13,9 +13,10 @@ defmodule Sadld.Connection do
   the socket. Several connections can attach to one session and each sees
   the whole stream. A new session gets the permission policy in its
   `:permissions_path` file. `session.send`, `session.cancel`,
-  `session.permit` and `session.compact` work on any running session.
-  Resuming a session that is not running, and `session.list`, wait on
-  persistence and answer with session not found and an internal error.
+  `session.permit`, `session.compact` and `session.command` work on any
+  running session. Resuming a session that is not running, and
+  `session.list`, wait on persistence and answer with session not found and
+  an internal error.
   """
 
   use GenServer, restart: :temporary
@@ -34,6 +35,7 @@ defmodule Sadld.Connection do
   @session_not_found -32_002
   @session_busy -32_003
   @not_pending -32_004
+  @command_not_found -32_005
 
   @doc """
   Starts a connection for an accepted socket. The caller must make the new
@@ -44,11 +46,13 @@ defmodule Sadld.Connection do
     * `:socket` (required) - the accepted client socket
     * `:session` - how `session.open` starts sessions, as `:provider` and
       `:tools` for `Sadld.Session.start/1`, `:model`, the model used when
-      the request names none, and `:permissions_path`, the
-      `Sadld.Permissions` policy file read for each new session. Missing
+      the request names none, `:permissions_path`, the
+      `Sadld.Permissions` policy file read for each new session, and
+      `:command_dirs`, where `session.command` finds commands. Missing
       keys default to the OpenAI provider offered `Sadld.Tools`, the
-      provider's configured model, and the `:sadld` `:permissions_path`
-      setting or `Sadld.Permissions.default_path/0`.
+      provider's configured model, the `:sadld` `:permissions_path`
+      setting or `Sadld.Permissions.default_path/0`, and
+      `Sadld.Commands.dirs/0`.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -223,6 +227,15 @@ defmodule Sadld.Connection do
     end
   end
 
+  defp dispatch(%Request{method: "session.command", id: id, params: params}, state) do
+    opts = if dirs = state.session[:command_dirs], do: [dirs: dirs], else: []
+
+    case Session.command(params.id, params.command, params.arguments, opts) do
+      {:ok, turn_id} -> {result(id, "session.command", %{turn_id: turn_id}), state}
+      {:error, reason} -> {session_error(id, reason), state}
+    end
+  end
+
   defp dispatch(%Request{id: id}, state),
     do: {error(id, @internal_error, "not implemented"), state}
 
@@ -243,6 +256,9 @@ defmodule Sadld.Connection do
 
   defp session_error(id, :not_found), do: error(id, @session_not_found, "session not found")
   defp session_error(id, :busy), do: error(id, @session_busy, "session busy")
+
+  defp session_error(id, :unknown_command),
+    do: error(id, @command_not_found, "command not found")
 
   defp session_error(id, :not_pending),
     do: error(id, @not_pending, "no pending permission request")

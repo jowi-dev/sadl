@@ -2,7 +2,8 @@ defmodule Sadld.SidecarTest do
   # Runs the real Bun host (server/priv/sidecar) with test/support/fake_plugin.ts.
   use ExUnit.Case, async: true
 
-  alias Sadld.{Session, Sidecar}
+  alias Sadld.Protocol.Notification
+  alias Sadld.{Session, SessionEvents, Sidecar}
   alias Sadld.Test.{StubProvider, StubTools}
 
   @moduletag :sidecar
@@ -91,6 +92,36 @@ defmodule Sadld.SidecarTest do
     missing = %{call | args: %{"id" => "missing"}}
     assert {:ok, json} = Sidecar.run_tool(sidecar, missing, context)
     assert %{"error" => %{"code" => -32_002}} = JSON.decode!(json)
+  end
+
+  test "a wrap-up command exits the session's clients at its next idle", ctx do
+    sidecar = start_sidecar(ctx.plugin, ctx.worktree)
+    commands = Path.join(ctx.tmp_dir, "commands")
+    File.mkdir_p!(Path.join(commands, "command"))
+    File.write!(Path.join(commands, "command/bye.md"), "Wrap up.")
+
+    {:ok, id} =
+      Session.start(
+        cwd: ctx.worktree,
+        model: "m",
+        provider:
+          {StubProvider,
+           respond: fn _messages ->
+             {:ok, %{text: "bye", tool_calls: [], usage: %{input_tokens: 1, output_tokens: 1}}}
+           end},
+        tools: {StubTools, []},
+        system_prompt: "s",
+        plugins: [{Sidecar, sidecar}]
+      )
+
+    :ok = SessionEvents.subscribe(id)
+    assert wait_until(fn -> Session.messages(id) != [] end)
+
+    {:ok, _turn_id} = Session.command(id, "bye", "", dirs: [commands])
+
+    assert_receive {:session_event, ^id, %Notification{method: "turn.end"}}, 5_000
+    assert_receive {:session_event, ^id, %Notification{method: "app.exit"}}, 5_000
+    assert %{content: "Wrap up. Say goodbye."} = Enum.at(Session.messages(id), 1)
   end
 
   @tag capture_log: true

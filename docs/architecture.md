@@ -73,6 +73,8 @@ in one long-lived server.
   unmodified in a supervised Bun sidecar per worktree, adding tools and
   hooking prompts, tool results and session events (ADR-0004,
   `docs/sidecar.md`).
+- Slash commands are opencode-format markdown files that the server expands
+  into the prompt, so commands installed for opencode work too (ADR-0005).
 
 ### Protocol
 

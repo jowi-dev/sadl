@@ -380,7 +380,7 @@ impl App {
                 self.usage.output_tokens += end.usage.output_tokens;
             }
             Event::AppExit(_) => self.quit = true,
-            Event::Error(_) => {}
+            Event::Error(_) | Event::Notice(_) => {}
         }
         self.transcript.apply(event);
     }
@@ -412,6 +412,7 @@ fn event_session(event: &Event) -> &str {
         Event::TurnCompacted(e) => &e.session_id,
         Event::Error(e) => &e.session_id,
         Event::AppExit(e) => &e.session_id,
+        Event::Notice(e) => &e.session_id,
     }
 }
 

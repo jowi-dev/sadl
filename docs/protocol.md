@@ -108,8 +108,8 @@ A `SessionInfo` object is `{id, cwd, model, updated_at}`: all strings,
 
 ## Notifications
 
-Every notification below carries `session_id` and, except `error` and
-`app.exit`, `turn_id`.
+Every notification below carries `session_id` and, except `error`,
+`app.exit` and `notice`, `turn_id`.
 
 | Method               | Params                                                                   |
 |----------------------|--------------------------------------------------------------------------|
@@ -121,6 +121,7 @@ Every notification below carries `session_id` and, except `error` and
 | `turn.compacted`     | `{session_id, turn_id, summary: string}`                                 |
 | `error`              | `{session_id, code: int, message: string}`                               |
 | `app.exit`           | `{session_id}`                                                           |
+| `notice`             | `{session_id, message: string, variant: string, duration_ms?: int}`     |
 
 - `turn.delta` is the next chunk of assistant text. Concatenating a turn's
   deltas yields its full text.
@@ -151,6 +152,11 @@ Every notification below carries `session_id` and, except `error` and
 - `app.exit` asks the clients showing the session to exit, because a plugin
   asked opencode's TUI to (`docs/sidecar.md`). The session keeps running on
   the server and can be resumed.
+- `notice` is a transient message for the user, such as a plugin's toast. It
+  belongs to no turn and is not part of the transcript, so clients show it
+  briefly outside it. `variant` is one of `"info"`, `"success"`,
+  `"warning"`, `"error"`. `duration_ms`, when present, is how long the
+  sender asked for it to stay; otherwise the client picks.
 
 ## Slash commands
 

@@ -75,7 +75,13 @@ defmodule Sadld.Protocol do
     ],
     "turn.compacted" => [session_id: :string, turn_id: :string, summary: :string],
     "error" => [session_id: :string, code: :integer, message: :string],
-    "app.exit" => [session_id: :string]
+    "app.exit" => [session_id: :string],
+    "notice" => [
+      session_id: :string,
+      message: :string,
+      variant: {:enum, ["info", "success", "warning", "error"]},
+      duration_ms: {:optional, :integer}
+    ]
   }
 
   @error_object [code: :integer, message: :string, data: {:optional, :any}]

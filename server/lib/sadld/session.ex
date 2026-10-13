@@ -17,7 +17,8 @@ defmodule Sadld.Session do
   `turn.compacted`, `turn.end` and `error` notifications of
   `docs/protocol.md`, in order. All of them are sent by the session
   process, so a subscriber that also made the `send_message/2` call gets the
-  reply before the turn's first notification.
+  reply before the turn's first notification. `request_exit/1` broadcasts
+  `app.exit` the same way.
 
   Each tool call is checked against the session's `Sadld.Permissions`
   policy before it runs. A denied call fails with an error result the model
@@ -208,6 +209,13 @@ defmodule Sadld.Session do
     end
   end
 
+  @doc """
+  Asks the clients showing the session to exit, with an `app.exit`
+  notification. The session itself keeps running.
+  """
+  @spec request_exit(id()) :: :ok | {:error, :not_found}
+  def request_exit(id), do: call(id, :request_exit)
+
   @doc "Returns the session's message list, oldest first."
   @spec messages(id()) :: [Sadld.Provider.message()] | {:error, :not_found}
   def messages(id), do: call(id, :messages)
@@ -330,6 +338,11 @@ defmodule Sadld.Session do
     else
       {:reply, {:error, :not_pending}, state}
     end
+  end
+
+  def handle_call(:request_exit, _from, state) do
+    notify(state, "app.exit", %{})
+    {:reply, :ok, state}
   end
 
   def handle_call(:messages, _from, state), do: {:reply, state.messages, state}

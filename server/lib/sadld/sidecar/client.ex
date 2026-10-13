@@ -19,24 +19,41 @@ defmodule Sadld.Sidecar.Client do
 
   @doc """
   Answers SDK call `method` with `params`, for a plugin serving `worktree`.
-  """
-  @spec handle(String.t(), map(), Path.t()) ::
-          {:ok, term()} | {:error, integer(), String.t()}
-  def handle(method, params, worktree)
 
-  def handle("session.get", %{"path" => %{"id" => id}}, _worktree) when is_binary(id) do
+  opencode's TUI calls name no session, since they act on the one its TUI
+  shows. Here they act on `session`, the one the plugin last heard about,
+  and fail with session not found when there is none.
+  """
+  @spec handle(String.t(), map(), Path.t(), Session.id() | nil) ::
+          {:ok, term()} | {:error, integer(), String.t()}
+  def handle(method, params, worktree, session \\ nil)
+
+  def handle("tui.executeCommand", %{"body" => %{"command" => command}}, _worktree, session)
+      when is_binary(command),
+      do: tui_command(command, session)
+
+  def handle(
+        "tui.publish",
+        %{"body" => %{"type" => "tui.command.execute", "properties" => %{"command" => command}}},
+        _worktree,
+        session
+      )
+      when is_binary(command),
+      do: tui_command(command, session)
+
+  def handle("session.get", %{"path" => %{"id" => id}}, _worktree, _session) when is_binary(id) do
     case Store.fetch_session(id) do
       {:ok, info} -> {:ok, Plugin.session(info)}
       {:error, :not_found} -> not_found()
     end
   end
 
-  def handle("session.list", _params, worktree) do
+  def handle("session.list", _params, worktree, _session) do
     sessions = for info <- Store.list_sessions(), within?(info.cwd, worktree), do: info
     {:ok, Enum.map(sessions, &Plugin.session/1)}
   end
 
-  def handle("session.status", _params, worktree) do
+  def handle("session.status", _params, worktree, _session) do
     statuses =
       for id <- Session.running(),
           %{cwd: cwd} <- [Session.info(id)],
@@ -48,7 +65,8 @@ defmodule Sadld.Sidecar.Client do
     {:ok, statuses}
   end
 
-  def handle("session.messages", %{"path" => %{"id" => id}}, _worktree) when is_binary(id) do
+  def handle("session.messages", %{"path" => %{"id" => id}}, _worktree, _session)
+      when is_binary(id) do
     with messages when is_list(messages) <- messages(id) do
       {:ok,
        for {message, index} <- Enum.with_index(messages),
@@ -66,7 +84,12 @@ defmodule Sadld.Sidecar.Client do
     end
   end
 
-  def handle(method, %{"path" => %{"id" => id}, "body" => %{"parts" => parts} = body}, _worktree)
+  def handle(
+        method,
+        %{"path" => %{"id" => id}, "body" => %{"parts" => parts} = body},
+        _worktree,
+        _session
+      )
       when method in ["session.prompt", "session.promptAsync"] and is_binary(id) and
              is_list(parts) do
     texts = for %{"type" => "text", "text" => text} <- parts, is_binary(text), do: text
@@ -90,22 +113,47 @@ defmodule Sadld.Sidecar.Client do
     end
   end
 
-  def handle("tui.showToast", %{"body" => %{"message" => message}}, worktree) do
+  def handle("tui.showToast", %{"body" => %{"message" => message}}, worktree, _session) do
     Logger.info("plugin notice in #{worktree}: #{message}")
     {:ok, true}
   end
 
-  def handle(method, _params, _worktree)
+  def handle(method, _params, _worktree, _session)
       when method in [
              "session.get",
              "session.messages",
              "session.prompt",
              "session.promptAsync",
-             "tui.showToast"
+             "tui.showToast",
+             "tui.executeCommand",
+             "tui.publish"
            ],
       do: {:error, @invalid_params, "invalid params"}
 
-  def handle(_method, _params, _worktree), do: {:error, @method_not_found, "method not found"}
+  def handle(_method, _params, _worktree, _session),
+    do: {:error, @method_not_found, "method not found"}
+
+  # opencode's TUI takes both the current command names and the older
+  # snake_case ones.
+  defp tui_command(_command, nil), do: not_found()
+
+  defp tui_command(command, session) when command in ["session_compact", "session.compact"] do
+    case Session.compact(session) do
+      {:ok, _turn_id} -> {:ok, true}
+      {:error, :busy} -> {:error, @session_busy, "session busy"}
+      {:error, :not_found} -> not_found()
+    end
+  end
+
+  defp tui_command(command, session) when command in ["app_exit", "app.exit"] do
+    case Session.request_exit(session) do
+      :ok -> {:ok, true}
+      {:error, :not_found} -> not_found()
+    end
+  end
+
+  defp tui_command(command, _session),
+    do: {:error, @invalid_params, "unsupported TUI command " <> command}
 
   defp messages(id) do
     case Session.messages(id) do

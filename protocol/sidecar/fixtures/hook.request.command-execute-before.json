@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "id": 4, "method": "hook", "params": {"name": "command.execute.before", "input": {"command": "thatch/compact", "sessionID": "s_1", "arguments": ""}, "output": {"parts": [{"type": "text", "text": "Wrap up the session, then end your reply with THATCH-GREENLIGHT."}]}}}

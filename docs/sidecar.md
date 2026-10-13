@@ -47,12 +47,19 @@ has answered.
   |--------------------------------------|---------------------------------|----------------------|
   | `experimental.chat.system.transform` | `{sessionID, model: {id}}`      | `{system: [string]}` |
   | `chat.message`                       | `{sessionID, messageID}`        | `{message, parts}`   |
+  | `command.execute.before`             | `{command, sessionID, arguments}` | `{parts}`          |
   | `tool.execute.after`                 | `{tool, sessionID, callID, args}` | `{title, output, metadata}` |
 
   In `chat.message`, `message` is `{id, sessionID, role: "user"}` and
   `parts` holds the user's text as one `{id, sessionID, messageID, type:
   "text", text}` part. Text parts the hook appends become messages of
   their own after the user's, `synthetic` when the part says so.
+
+  `command.execute.before` runs when a client starts slash command
+  `command` (named without its `/`) with `arguments`, before its turn.
+  `parts` holds the command's expanded template as one `{type: "text",
+  text}` part. The text parts the hook leaves, joined with blank lines,
+  become the turn's user message.
 
 A notification is not answered:
 
@@ -85,6 +92,8 @@ params. The result is the call's `data`; the host hands the plugin
 | `session.prompt`       | `{path: {id}, body: {parts, noReply?}}`| `{info, parts}`        |
 | `session.promptAsync`  | `{path: {id}, body: {parts, noReply?}}`| `{}`                   |
 | `tui.showToast`        | `{body: {message, variant, ...}}`      | `true`                 |
+| `tui.executeCommand`   | `{body: {command}}`                    | `true`                 |
+| `tui.publish`          | `{body: {type, properties}}`           | `true`                 |
 
 - `Session` is `{id, title, directory, time: {created, updated}}`, times in
   Unix milliseconds; sadld keeps no separate creation time, so `created` is
@@ -101,6 +110,18 @@ params. The result is the call's `data`; the host hands the plugin
   running. Neither waits for the turn: `session.prompt` answers with the
   recorded message, whose `info` has no `id`. The session must be running.
 - `tui.showToast` writes the message to sadld's log.
+- `tui.executeCommand` and `tui.publish` name no session: in opencode
+  they act on the session its TUI shows. Here they act on the session
+  sadld last told the host about, the latest named by an `event`, a `hook`
+  `input` or a `tool.execute` `context`, and fail with `-32002` before
+  there is one. `tui.executeCommand` takes a `command`, as does
+  `tui.publish` with `type` `"tui.command.execute"` in `properties`.
+  `session_compact` (or `session.compact`) compacts the session as the
+  client request `session.compact` does, failing with `-32003` while a
+  turn runs. `app_exit` (or `app.exit`) sends the session's clients
+  `app.exit` (`docs/protocol.md`), which closes the TUI; the session
+  keeps running. Any other command, or any other `tui.publish` type,
+  fails with `-32602`.
 
 Any other method answers `-32601`. That includes `session.create`,
 `session.delete` and the rest of `tui`.

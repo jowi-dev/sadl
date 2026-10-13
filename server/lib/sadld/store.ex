@@ -3,10 +3,14 @@ defmodule Sadld.Store do
   SQLite persistence for sessions and their messages.
 
   One process owns the database connection, so writes are serialized. Each
-  session row holds its id, cwd, model and timestamps; its messages are kept
-  in order, tool calls, tool results and the `synthetic` mark of injected
-  user messages included, so a session can be rebuilt after its process or
-  the whole server restarts.
+  session row holds its id, cwd, model, timestamps and, for a child session,
+  its parent's id; its messages are kept in order, tool calls, tool results
+  and the `synthetic` mark of injected user messages included, so a session
+  can be rebuilt after its process or the whole server restarts. Deleting a
+  session deletes its children with it.
+
+  A database written before child sessions existed gains the parent column
+  when the store opens it.
 
   Compaction never rewrites messages. Each compaction is a row of its own
   holding a summary and `first_kept`, the seq (zero-based position) of the
@@ -29,11 +33,16 @@ defmodule Sadld.Store do
 
   alias Exqlite.Sqlite3
 
-  @typedoc "The `SessionInfo` of `docs/protocol.md`. `updated_at` is RFC 3339 UTC."
+  @typedoc """
+  A stored session: the `SessionInfo` of `docs/protocol.md` plus
+  `parent_id`, the session a child session was created under (`nil` for
+  none). `updated_at` is RFC 3339 UTC.
+  """
   @type session_info :: %{
           id: String.t(),
           cwd: String.t(),
           model: String.t(),
+          parent_id: String.t() | nil,
           updated_at: String.t()
         }
 
@@ -44,7 +53,8 @@ defmodule Sadld.Store do
       cwd TEXT NOT NULL,
       model TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      parent_id TEXT REFERENCES sessions (id)
     )
     """,
     """
@@ -66,7 +76,7 @@ defmodule Sadld.Store do
     """
   ]
 
-  @session_columns "id, cwd, model, updated_at"
+  @session_columns "id, cwd, model, updated_at, parent_id"
 
   @doc "Starts the store. See the module docs for options."
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -92,11 +102,27 @@ defmodule Sadld.Store do
     Path.join([data_home, "sadl", "sadl.db"])
   end
 
-  @doc "Records a new session with no messages and returns its info."
-  @spec create_session(GenServer.server(), %{id: String.t(), cwd: String.t(), model: String.t()}) ::
-          {:ok, session_info()}
+  @doc """
+  Records a new session with no messages and returns its info. A child
+  session gives its parent's id as `:parent_id`.
+  """
+  @spec create_session(GenServer.server(), %{
+          required(:id) => String.t(),
+          required(:cwd) => String.t(),
+          required(:model) => String.t(),
+          optional(:parent_id) => String.t() | nil
+        }) :: {:ok, session_info()}
   def create_session(store \\ __MODULE__, session),
     do: GenServer.call(store, {:create_session, session})
+
+  @doc """
+  Deletes session `id` and its descendants, with their messages and
+  compactions, in one transaction. Returns the info of every session
+  deleted.
+  """
+  @spec delete_session(GenServer.server(), String.t()) ::
+          {:ok, [session_info()]} | {:error, :not_found}
+  def delete_session(store \\ __MODULE__, id), do: GenServer.call(store, {:delete_session, id})
 
   @doc "Returns the info of session `id`."
   @spec fetch_session(GenServer.server(), String.t()) ::
@@ -143,6 +169,7 @@ defmodule Sadld.Store do
     :ok = Sqlite3.execute(conn, "PRAGMA journal_mode = WAL")
     :ok = Sqlite3.execute(conn, "PRAGMA foreign_keys = ON")
     Enum.each(@schema, &(:ok = Sqlite3.execute(conn, &1)))
+    migrate(conn)
 
     {:ok, %{conn: conn, last_timestamp: nil}}
   end
@@ -154,14 +181,48 @@ defmodule Sadld.Store do
   def handle_call({:create_session, session}, _from, state) do
     {now, state} = timestamp(state)
 
-    query(state.conn, "INSERT INTO sessions VALUES (?1, ?2, ?3, ?4, ?4)", [
-      session.id,
-      session.cwd,
-      session.model,
-      now
-    ])
+    session = Map.put_new(session, :parent_id, nil)
 
-    {:reply, {:ok, Map.put(Map.take(session, [:id, :cwd, :model]), :updated_at, now)}, state}
+    query(
+      state.conn,
+      "INSERT INTO sessions (#{@session_columns}, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?4)",
+      [session.id, session.cwd, session.model, now, session.parent_id]
+    )
+
+    info = Map.put(Map.take(session, [:id, :cwd, :model, :parent_id]), :updated_at, now)
+    {:reply, {:ok, info}, state}
+  end
+
+  def handle_call({:delete_session, id}, _from, state) do
+    # The session and its descendants, each listed after its parent.
+    sql = """
+    WITH RECURSIVE tree (id, depth) AS (
+      SELECT id, 0 FROM sessions WHERE id = ?1
+      UNION ALL
+      SELECT sessions.id, depth + 1 FROM sessions JOIN tree ON sessions.parent_id = tree.id
+    )
+    SELECT #{@session_columns} FROM tree JOIN sessions USING (id) ORDER BY depth
+    """
+
+    case Enum.map(query(state.conn, sql, [id]), &session_info/1) do
+      [] ->
+        {:reply, {:error, :not_found}, state}
+
+      deleted ->
+        transaction(state.conn, fn ->
+          # Children first, so no row is left pointing at a deleted parent.
+          for %{id: id} <- Enum.reverse(deleted),
+              table <- ["messages", "compactions"] do
+            query(state.conn, "DELETE FROM #{table} WHERE session_id = ?1", [id])
+          end
+
+          for %{id: id} <- Enum.reverse(deleted) do
+            query(state.conn, "DELETE FROM sessions WHERE id = ?1", [id])
+          end
+        end)
+
+        {:reply, {:ok, deleted}, state}
+    end
   end
 
   def handle_call({:fetch_session, id}, _from, state) do
@@ -186,9 +247,7 @@ defmodule Sadld.Store do
     {now, state} = timestamp(state)
     conn = state.conn
 
-    :ok = Sqlite3.execute(conn, "BEGIN IMMEDIATE")
-
-    try do
+    transaction(conn, fn ->
       [[next]] =
         query(conn, "SELECT COALESCE(MAX(seq) + 1, 0) FROM messages WHERE session_id = ?1", [id])
 
@@ -200,12 +259,7 @@ defmodule Sadld.Store do
       end)
 
       query(conn, "UPDATE sessions SET updated_at = ?2 WHERE id = ?1", [id, now])
-      :ok = Sqlite3.execute(conn, "COMMIT")
-    rescue
-      error ->
-        Sqlite3.execute(conn, "ROLLBACK")
-        reraise error, __STACKTRACE__
-    end
+    end)
 
     {:reply, :ok, state}
   end
@@ -244,6 +298,33 @@ defmodule Sadld.Store do
     end
   end
 
+  # Adds the parent column to a database created before child sessions.
+  defp migrate(conn) do
+    columns = for [_cid, name | _rest] <- query(conn, "PRAGMA table_info(sessions)", []), do: name
+
+    if "parent_id" not in columns do
+      :ok =
+        Sqlite3.execute(
+          conn,
+          "ALTER TABLE sessions ADD COLUMN parent_id TEXT REFERENCES sessions (id)"
+        )
+    end
+  end
+
+  # Runs `fun` in a transaction, rolled back if it raises.
+  defp transaction(conn, fun) do
+    :ok = Sqlite3.execute(conn, "BEGIN IMMEDIATE")
+
+    try do
+      fun.()
+      :ok = Sqlite3.execute(conn, "COMMIT")
+    rescue
+      error ->
+        Sqlite3.execute(conn, "ROLLBACK")
+        reraise error, __STACKTRACE__
+    end
+  end
+
   # Runs one statement and returns its rows; crashes on any failure.
   defp query(conn, sql, args) do
     {:ok, statement} = Sqlite3.prepare(conn, sql)
@@ -270,8 +351,8 @@ defmodule Sadld.Store do
     {DateTime.to_iso8601(now), %{state | last_timestamp: now}}
   end
 
-  defp session_info([id, cwd, model, updated_at]),
-    do: %{id: id, cwd: cwd, model: model, updated_at: updated_at}
+  defp session_info([id, cwd, model, updated_at, parent_id]),
+    do: %{id: id, cwd: cwd, model: model, parent_id: parent_id, updated_at: updated_at}
 
   defp encode_message(%{role: :user} = message),
     do: {"user", JSON.encode!(Map.take(message, [:content, :synthetic]))}

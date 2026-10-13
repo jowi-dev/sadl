@@ -64,7 +64,7 @@ defmodule Sadld.SessionPluginsTest do
     refute_receive {:event, "session.created", _properties}
   end
 
-  test "plugin tools are offered to the model after the session's own" do
+  test "plugin tools are offered to the model after the session's own and task" do
     test_pid = self()
 
     respond = fn _messages, _on_text, opts ->
@@ -76,7 +76,7 @@ defmodule Sadld.SessionPluginsTest do
     {:ok, turn_id} = Session.send_message(id, "hi")
     await_turn(turn_id)
 
-    assert_received {:tools, [%{name: "read"}, @plugin_tool]}
+    assert_received {:tools, [%{name: "read"}, %{name: "task"}, @plugin_tool]}
   end
 
   test "a call to a plugin tool runs in the plugin" do

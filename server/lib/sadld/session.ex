@@ -57,6 +57,9 @@ defmodule Sadld.Session do
   after it, `session.error` when it fails and `session.deleted` when
   `delete/1` removes it.
 
+  A top-level session also offers the model `Sadld.Subagent`'s `task` tool,
+  after its own tools, which runs a prompt in a child session.
+
   A child session, started by `create_child/1`, runs under a parent: it
   inherits the parent's cwd, model, provider, tools, permission policy,
   system prompt and plugins, and is stored with the parent's id. Children
@@ -69,7 +72,7 @@ defmodule Sadld.Session do
   use GenServer, restart: :transient
 
   alias Sadld.Protocol.Notification
-  alias Sadld.{Commands, Compaction, Permissions, Plugin, SessionEvents, Store}
+  alias Sadld.{Commands, Compaction, Permissions, Plugin, SessionEvents, Store, Subagent}
 
   @registry Sadld.SessionRegistry
   @supervisor Sadld.SessionSupervisor
@@ -644,19 +647,18 @@ defmodule Sadld.Session do
   end
 
   # A chat turn, run inside the turn task. `report` sends an event to the
-  # session. It offers the plugins' tools after the session's own and adds
-  # the user messages plugins append to the prompt, then runs the steps.
+  # session. It offers the `task` tool (to a top-level session) and the
+  # plugins' tools after the session's own, adds the user messages plugins
+  # append to the prompt, then runs the steps.
   # Returns `:completed` or `{:error, reason}`.
   defp run_turn(ctx, prompt, %{provider: {_provider, provider_opts}} = env, report) do
-    builtin = Keyword.get(provider_opts, :tools, [])
+    own = Keyword.get(provider_opts, :tools, [])
+    builtin = if env.parent_id, do: own, else: own ++ [Subagent.spec()]
     plugin_tools = Plugin.tools(env.plugins, Enum.map(builtin, & &1.name))
+    tools = builtin ++ Enum.map(plugin_tools, &elem(&1, 0))
 
     env = Map.put(env, :plugin_tools, Map.new(plugin_tools, fn {spec, p} -> {spec.name, p} end))
-
-    env =
-      if plugin_tools == [],
-        do: env,
-        else: put_provider_opt(env, :tools, builtin ++ Enum.map(plugin_tools, &elem(&1, 0)))
+    env = if tools == own, do: env, else: put_provider_opt(env, :tools, tools)
 
     case chat_message(prompt, env) do
       [] ->
@@ -812,6 +814,9 @@ defmodule Sadld.Session do
     report.({:notify, "tool.result", %{call_id: call.id, output: output, is_error: is_error}})
     %{role: :tool, call_id: call.id, content: output, is_error: is_error}
   end
+
+  defp execute(%{name: "task"} = call, %{parent_id: nil} = context),
+    do: Subagent.run(call.args, context.id)
 
   defp execute(call, %{tools: {tools, tools_opts}} = context) do
     case Map.fetch(context.plugin_tools, call.name) do

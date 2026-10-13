@@ -149,6 +149,80 @@ defmodule Sadld.SessionChildrenTest do
     end
   end
 
+  describe "the task tool" do
+    test "is offered to a session but not to its children" do
+      test_pid = self()
+
+      respond = fn _messages, _on_text, opts ->
+        send(test_pid, {:tools, Enum.map(opts[:tools], & &1.name)})
+        reply("hi")
+      end
+
+      {:ok, id} =
+        Session.start(
+          cwd: "/tmp/project",
+          model: "stub-model",
+          provider: {StubProvider, respond: respond, tools: [%{name: "read"}]},
+          tools: {StubTools, run: fn _call, _cwd -> {:ok, "ran"} end},
+          system_prompt: "base",
+          plugins: []
+        )
+
+      {:ok, child} = Session.create_child(id)
+
+      assert {:ok, _reply} = Session.prompt(id, "hi")
+      assert_received {:tools, ["read", "task"]}
+
+      assert {:ok, _reply} = Session.prompt(child, "hi")
+      assert_received {:tools, ["read"]}
+    end
+
+    test "runs the prompt in a child session and returns its final reply" do
+      call = %{
+        id: "t",
+        name: "task",
+        args: %{"description" => "Count files", "prompt" => "count the files"}
+      }
+
+      respond = fn messages ->
+        case messages do
+          [%{content: "count the files"}] -> reply("there are 3")
+          [%{content: "delegate"}] -> {:ok, %{text: "", tool_calls: [call], usage: @usage}}
+          _after_task -> reply("the child said so")
+        end
+      end
+
+      parent = start_session(respond)
+
+      assert {:ok, %{text: "the child said so"}} = Session.prompt(parent, "delegate")
+
+      assert %{role: :tool, call_id: "t", content: "there are 3", is_error: false} =
+               Enum.find(Session.messages(parent), &(&1.role == :tool))
+
+      assert [%{id: child, parent_id: ^parent}] =
+               Enum.filter(Store.list_sessions(), &(&1.parent_id == parent))
+
+      assert [%{content: "count the files"}, %{content: "there are 3"}] = Session.messages(child)
+    end
+
+    test "fails without a prompt" do
+      call = %{id: "t", name: "task", args: %{"description" => "nothing"}}
+
+      respond = fn messages ->
+        case List.last(messages) do
+          %{role: :tool} -> reply("ok")
+          _user -> {:ok, %{text: "", tool_calls: [call], usage: @usage}}
+        end
+      end
+
+      parent = start_session(respond)
+      {:ok, _reply} = Session.prompt(parent, "delegate")
+
+      assert %{role: :tool, is_error: true, content: "missing required argument `prompt`"} =
+               Enum.find(Session.messages(parent), &(&1.role == :tool))
+    end
+  end
+
   describe "prompt/3" do
     test "runs a turn and answers with its final reply" do
       id = start_session(reads_once(self()))

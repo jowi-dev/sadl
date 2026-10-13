@@ -5,7 +5,7 @@ defmodule Sadld.Sidecar.Client do
 
   Each answer is computed in the caller, which `Sadld.Sidecar` runs in a
   task of its own: answering may call a session that is itself waiting on
-  the sidecar.
+  the sidecar, and `session.prompt` waits for a whole turn.
   """
 
   require Logger
@@ -16,6 +16,7 @@ defmodule Sadld.Sidecar.Client do
   @invalid_params -32_602
   @session_not_found -32_002
   @session_busy -32_003
+  @internal_error -32_603
 
   @doc """
   Answers SDK call `method` with `params`, for a plugin serving `worktree`.
@@ -97,11 +98,23 @@ defmodule Sadld.Sidecar.Client do
     synthetic = Enum.any?(parts, &(&1["synthetic"] == true))
     opts = [synthetic: synthetic, no_reply: body["noReply"] == true]
 
-    case Session.send_message(id, text, opts) do
+    result =
+      if method == "session.prompt" and not opts[:no_reply],
+        do: Session.prompt(id, text, opts),
+        else: Session.send_message(id, text, opts)
+
+    case result do
       {:ok, _turn_id} when method == "session.promptAsync" ->
         {:ok, %{}}
 
-      {:ok, _turn_id} ->
+      {:ok, %{seq: seq, text: reply}} ->
+        {:ok,
+         %{
+           "info" => %{"id" => "#{id}_#{seq}", "sessionID" => id, "role" => "assistant"},
+           "parts" => [part(reply, false)]
+         }}
+
+      {:ok, nil} ->
         {:ok,
          %{"info" => %{"sessionID" => id, "role" => "user"}, "parts" => [part(text, synthetic)]}}
 
@@ -110,6 +123,31 @@ defmodule Sadld.Sidecar.Client do
 
       {:error, :not_found} ->
         not_found()
+
+      {:error, :cancelled} ->
+        {:error, @internal_error, "turn cancelled"}
+
+      {:error, {:failed, message}} ->
+        {:error, @internal_error, message}
+    end
+  end
+
+  def handle("session.create", %{"body" => %{"parentID" => parent_id}}, _worktree, _session)
+      when is_binary(parent_id) do
+    with {:ok, id} <- Session.create_child(parent_id),
+         {:ok, info} <- Store.fetch_session(id) do
+      {:ok, Plugin.session(info)}
+    else
+      {:error, :not_found} -> not_found()
+      {:error, reason} -> {:error, @internal_error, inspect(reason)}
+    end
+  end
+
+  def handle("session.delete", %{"path" => %{"id" => id}}, _worktree, _session)
+      when is_binary(id) do
+    case Session.delete(id) do
+      :ok -> {:ok, true}
+      {:error, :not_found} -> not_found()
     end
   end
 
@@ -121,6 +159,8 @@ defmodule Sadld.Sidecar.Client do
   def handle(method, _params, _worktree, _session)
       when method in [
              "session.get",
+             "session.create",
+             "session.delete",
              "session.messages",
              "session.prompt",
              "session.promptAsync",

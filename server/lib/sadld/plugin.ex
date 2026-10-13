@@ -25,8 +25,8 @@ defmodule Sadld.Plugin do
       and `%{"title", "output", "metadata"}` after each tool call. The
       `"output"` it leaves is what the model reads.
 
-  and sends the events `session.created`, `session.status`, `session.idle`
-  and `session.error` described in `docs/sidecar.md`.
+  and sends the events `session.created`, `session.status`, `session.idle`,
+  `session.error` and `session.deleted` described in `docs/sidecar.md`.
   """
 
   @type t :: {module(), ref()}
@@ -83,19 +83,28 @@ defmodule Sadld.Plugin do
   @doc """
   Describes a session as opencode's `Session` object, from its stored info.
   sadld keeps no creation time apart from the store's, so `created` is the
-  last update too.
+  last update too. A child session's `parent_id` is its `parentID`.
   """
-  @spec session(%{id: String.t(), cwd: Path.t(), updated_at: String.t() | DateTime.t()}) ::
-          map()
-  def session(%{id: id, cwd: cwd, updated_at: updated_at}) do
+  @spec session(%{
+          required(:id) => String.t(),
+          required(:cwd) => Path.t(),
+          required(:updated_at) => String.t() | DateTime.t(),
+          optional(:parent_id) => String.t() | nil
+        }) :: map()
+  def session(%{id: id, cwd: cwd, updated_at: updated_at} = info) do
     updated = updated_at |> to_datetime() |> DateTime.to_unix(:millisecond)
 
-    %{
+    session = %{
       "id" => id,
       "title" => "",
       "directory" => cwd,
       "time" => %{"created" => updated, "updated" => updated}
     }
+
+    case info[:parent_id] do
+      nil -> session
+      parent_id -> Map.put(session, "parentID", parent_id)
+    end
   end
 
   defp to_datetime(%DateTime{} = datetime), do: datetime

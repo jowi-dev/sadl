@@ -102,3 +102,24 @@ from `command/` or `commands/` under `$XDG_CONFIG_HOME/opencode/` and
 `/thatch/exit` closes the TUI once the wrap-up is done, and the session
 stays resumable. `/compact` is built in. See
 [ADR-0005](docs/decisions/0005-slash-commands.md).
+
+## Skills
+
+A skill is a `SKILL.md` file in its own directory under a skills dir, opening
+with front matter that names and describes it:
+
+```markdown
+---
+name: tidy
+description: Tidy up a module before review.
+---
+
+The instructions the model follows once it loads the skill.
+```
+
+The system prompt lists every skill, and the `skill` tool loads one by name.
+sadld searches `.opencode/skills` in the working directory and its ancestors
+(nearest first), then `$XDG_CONFIG_HOME/sadl/skills`, then
+`$XDG_CONFIG_HOME/opencode/skills`, where the thatch plugin installs its own;
+the first skill with a given name wins. See
+[ADR-0005](docs/decisions/0005-skills.md).

@@ -75,6 +75,9 @@ in one long-lived server.
   `docs/sidecar.md`).
 - Slash commands are opencode-format markdown files that the server expands
   into the prompt, so commands installed for opencode work too (ADR-0005).
+- Skills (`SKILL.md` files in opencode's layout, including the ones thatch
+  installs) are listed in the system prompt and loaded with a built-in
+  `skill` tool (ADR-0005).
 
 ### Protocol
 

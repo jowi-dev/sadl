@@ -8,11 +8,13 @@ pub mod view;
 pub mod wrap;
 
 use std::error::Error;
+use std::time::Instant;
 
 use crossterm::event::Event;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::time::sleep_until;
 
 use crate::link::{Incoming, Link};
 use crate::protocol::Call;
@@ -24,10 +26,11 @@ pub type RunError = Box<dyn Error + Send + Sync>;
 /// Runs the chat on `terminal` until the user quits or `events` closes.
 ///
 /// Opens the app's session on `link`, then redraws after every terminal
-/// event from `events` and every message from the server. Messages already
-/// waiting on the socket are handled before the next key, so a key always
-/// acts on what the server has said so far. Fails if drawing fails or the
-/// server rejects the handshake on a reconnect.
+/// event from `events`, every message from the server and the expiry of the
+/// shown notice. Messages already waiting on the socket are handled before
+/// the next key, so a key always acts on what the server has said so far.
+/// Fails if drawing fails or the server rejects the handshake on a
+/// reconnect.
 pub async fn run<B>(
     terminal: &mut Terminal<B>,
     link: &mut Link,
@@ -42,6 +45,7 @@ where
     send(link, app, open).await;
     while !app.should_quit() {
         terminal.draw(|frame| view::draw(frame, app))?;
+        let notice_deadline = app.notice_deadline();
         tokio::select! {
             biased;
             incoming = link.recv() => match incoming? {
@@ -66,9 +70,18 @@ where
                 Some(_) => {}
                 None => break,
             },
+            () = expire(notice_deadline) => app.expire_notice(Instant::now()),
         }
     }
     Ok(())
+}
+
+/// Waits until `deadline`, or forever without one.
+async fn expire(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => sleep_until(deadline.into()).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Sends `call` and tells `app` its id. A failed write is shown; the next

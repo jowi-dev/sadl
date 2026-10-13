@@ -158,3 +158,48 @@ async fn chats_with_the_server_until_ctrl_c() {
     );
     assert!(shown.contains("running (Esc to cancel)"), "{shown}");
 }
+
+#[tokio::test]
+async fn a_notice_disappears_on_its_own_once_it_expires() {
+    let path = support::socket_path();
+    let listener = UnixListener::bind(&path).unwrap();
+    let (link, server) = tokio::join!(
+        Link::connect(path, Backoff::default()),
+        Server::accept(&listener)
+    );
+    let (mut link, mut server) = (link.expect("connected"), server);
+    let (keys, mut events) = mpsc::unbounded_channel();
+
+    let client = tokio::spawn(async move {
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        let mut app = App::new(Start::Open {
+            cwd: "/home/u/proj".into(),
+            model: None,
+        });
+        tui::run(&mut terminal, &mut link, &mut app, &mut events)
+            .await
+            .expect("run");
+        terminal
+    });
+
+    server.request().await;
+    server.write(OPENED).await;
+    server
+        .write(
+            r#"{"jsonrpc": "2.0", "method": "notice", "params": {"session_id": "s_01", "message": "recalled 2 memories", "variant": "info", "duration_ms": 50}}"#,
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Ctrl+C quits without redrawing, so the screen is the last one drawn
+    // before the key: after the notice expired, with no other event.
+    keys.send(press(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        .unwrap();
+    let terminal = timeout(Duration::from_secs(5), client)
+        .await
+        .expect("the client quits")
+        .unwrap();
+
+    let shown = screen(&terminal);
+    assert!(!shown.contains("recalled 2 memories"), "{shown}");
+}

@@ -96,39 +96,21 @@ defmodule Sadld.Sidecar.Client do
     texts = for %{"type" => "text", "text" => text} <- parts, is_binary(text), do: text
     text = Enum.join(texts, "\n\n")
     synthetic = Enum.any?(parts, &(&1["synthetic"] == true))
-    opts = [synthetic: synthetic, no_reply: body["noReply"] == true]
+    no_reply = body["noReply"] == true
 
-    result =
-      if method == "session.prompt" and not opts[:no_reply],
-        do: Session.prompt(id, text, opts),
-        else: Session.send_message(id, text, opts)
+    cond do
+      method == "session.promptAsync" ->
+        opts = [synthetic: synthetic, no_reply: no_reply]
+        with {:ok, _turn_id} <- record(id, text, opts), do: {:ok, %{}}
 
-    case result do
-      {:ok, _turn_id} when method == "session.promptAsync" ->
-        {:ok, %{}}
+      no_reply ->
+        with {:ok, nil} <- record(id, text, synthetic: synthetic, no_reply: true) do
+          {:ok,
+           %{"info" => %{"sessionID" => id, "role" => "user"}, "parts" => [part(text, synthetic)]}}
+        end
 
-      {:ok, %{seq: seq, text: reply}} ->
-        {:ok,
-         %{
-           "info" => %{"id" => "#{id}_#{seq}", "sessionID" => id, "role" => "assistant"},
-           "parts" => [part(reply, false)]
-         }}
-
-      {:ok, nil} ->
-        {:ok,
-         %{"info" => %{"sessionID" => id, "role" => "user"}, "parts" => [part(text, synthetic)]}}
-
-      {:error, :busy} ->
-        {:error, @session_busy, "session busy"}
-
-      {:error, :not_found} ->
-        not_found()
-
-      {:error, :cancelled} ->
-        {:error, @internal_error, "turn cancelled"}
-
-      {:error, {:failed, message}} ->
-        {:error, @internal_error, message}
+      true ->
+        await_reply(id, text, synthetic)
     end
   end
 
@@ -207,6 +189,34 @@ defmodule Sadld.Sidecar.Client do
         messages
     end
   end
+
+  # Starts a turn on session `id`, or records the message with `:no_reply`.
+  defp record(id, text, opts) do
+    case Session.send_message(id, text, opts) do
+      {:ok, turn_id} -> {:ok, turn_id}
+      {:error, reason} -> prompt_error(reason)
+    end
+  end
+
+  # Runs a turn on session `id` and answers with its reply message.
+  defp await_reply(id, text, synthetic) do
+    case Session.prompt(id, text, synthetic: synthetic) do
+      {:ok, %{seq: seq, text: reply}} ->
+        {:ok,
+         %{
+           "info" => %{"id" => "#{id}_#{seq}", "sessionID" => id, "role" => "assistant"},
+           "parts" => [part(reply, false)]
+         }}
+
+      {:error, reason} ->
+        prompt_error(reason)
+    end
+  end
+
+  defp prompt_error(:busy), do: {:error, @session_busy, "session busy"}
+  defp prompt_error(:not_found), do: not_found()
+  defp prompt_error(:cancelled), do: {:error, @internal_error, "turn cancelled"}
+  defp prompt_error({:failed, message}), do: {:error, @internal_error, message}
 
   defp part(text, true), do: %{"type" => "text", "text" => text, "synthetic" => true}
   defp part(text, _synthetic), do: %{"type" => "text", "text" => text}

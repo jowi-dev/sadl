@@ -209,16 +209,9 @@ defmodule Sadld.Store do
         {:reply, {:error, :not_found}, state}
 
       deleted ->
+        # Children first, so no row is left pointing at a deleted parent.
         transaction(state.conn, fn ->
-          # Children first, so no row is left pointing at a deleted parent.
-          for %{id: id} <- Enum.reverse(deleted),
-              table <- ["messages", "compactions"] do
-            query(state.conn, "DELETE FROM #{table} WHERE session_id = ?1", [id])
-          end
-
-          for %{id: id} <- Enum.reverse(deleted) do
-            query(state.conn, "DELETE FROM sessions WHERE id = ?1", [id])
-          end
+          Enum.each(Enum.reverse(deleted), &delete_rows(state.conn, &1.id))
         end)
 
         {:reply, {:ok, deleted}, state}
@@ -296,6 +289,12 @@ defmodule Sadld.Store do
       [[summary, first_kept]] -> {:reply, %{summary: summary, first_kept: first_kept}, state}
       [] -> {:reply, nil, state}
     end
+  end
+
+  defp delete_rows(conn, id) do
+    query(conn, "DELETE FROM messages WHERE session_id = ?1", [id])
+    query(conn, "DELETE FROM compactions WHERE session_id = ?1", [id])
+    query(conn, "DELETE FROM sessions WHERE id = ?1", [id])
   end
 
   # Adds the parent column to a database created before child sessions.

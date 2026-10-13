@@ -92,3 +92,13 @@ to load others instead, or `[]` for none. Without Bun, or with the variable
 unset, sessions run without plugins. See
 [ADR-0004](docs/decisions/0004-plugin-sidecar.md) and
 [`docs/sidecar.md`](docs/sidecar.md).
+
+## Slash commands
+
+Typing `/name args` runs a slash command: sadld expands the markdown
+command `name` into the prompt. Commands use opencode's format and are read
+from `command/` or `commands/` under `$XDG_CONFIG_HOME/opencode/` and
+`$XDG_CONFIG_HOME/sadl/`, so thatch's `/thatch/*` commands work as installed.
+`/thatch/exit` closes the TUI once the wrap-up is done, and the session
+stays resumable. `/compact` is built in. See
+[ADR-0005](docs/decisions/0005-slash-commands.md).

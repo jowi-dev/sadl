@@ -3,12 +3,14 @@
 //! directly in tests.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::protocol::{
-    Call, Decision, ErrorObject, Event, Outcome, Response, ServerMessage, SessionCommandParams,
-    SessionIdParams, SessionInfo, SessionPermitParams, SessionSendParams, Usage,
+    Call, Decision, ErrorObject, Event, NoticeVariant, Outcome, Response, ServerMessage,
+    SessionCommandParams, SessionIdParams, SessionInfo, SessionPermitParams, SessionSendParams,
+    Usage,
 };
 use crate::start::Start;
 use crate::tui::input::Input;
@@ -28,6 +30,9 @@ const COMMAND_PREFIX: char = '/';
 /// Lines scrolled per PageUp/PageDown when the view height is unknown.
 const DEFAULT_PAGE: usize = 10;
 
+/// How long a notice stays when the server names no duration.
+pub const DEFAULT_NOTICE_DURATION: Duration = Duration::from_secs(4);
+
 /// What a request this client sent was for, so its response can be handled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Pending {
@@ -40,6 +45,14 @@ enum Pending {
     Cancel,
     Permit,
     Other,
+}
+
+/// A transient message shown outside the transcript until `until`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShownNotice {
+    pub message: String,
+    pub variant: NoticeVariant,
+    until: Instant,
 }
 
 /// Everything the TUI draws, plus the requests it is waiting on.
@@ -61,6 +74,8 @@ pub struct App {
     pub scroll: usize,
     /// Height of the transcript view at the last draw, for paging.
     pub page: usize,
+    /// The latest notice, until it expires.
+    pub notice: Option<ShownNotice>,
     start: Start,
     /// A prompt to send once the session opens, until it is sent.
     prompt: Option<String>,
@@ -85,6 +100,7 @@ impl App {
             expand_tools: false,
             scroll: 0,
             page: DEFAULT_PAGE,
+            notice: None,
             start,
             prompt: None,
             read_only: false,
@@ -253,6 +269,18 @@ impl App {
         self.quit
     }
 
+    /// When the shown notice should go, if one is shown.
+    pub fn notice_deadline(&self) -> Option<Instant> {
+        self.notice.as_ref().map(|notice| notice.until)
+    }
+
+    /// Drops the shown notice if its time is up at `now`.
+    pub fn expire_notice(&mut self, now: Instant) {
+        if self.notice_deadline().is_some_and(|until| until <= now) {
+            self.notice = None;
+        }
+    }
+
     fn submit(&mut self) -> Option<Call> {
         if self.session.is_none() || self.running || self.input.is_blank() {
             return None;
@@ -380,7 +408,17 @@ impl App {
                 self.usage.output_tokens += end.usage.output_tokens;
             }
             Event::AppExit(_) => self.quit = true,
-            Event::Error(_) | Event::Notice(_) => {}
+            Event::Notice(notice) => {
+                let duration = notice
+                    .duration_ms
+                    .map_or(DEFAULT_NOTICE_DURATION, Duration::from_millis);
+                self.notice = Some(ShownNotice {
+                    message: notice.message.clone(),
+                    variant: notice.variant,
+                    until: Instant::now() + duration,
+                });
+            }
+            Event::Error(_) => {}
         }
         self.transcript.apply(event);
     }
@@ -420,7 +458,7 @@ fn event_session(event: &Event) -> &str {
 mod tests {
     use super::*;
     use crate::protocol::{
-        AppExit, Decision, JsonRpc, Notification, PermissionRequest, SessionCommandParams,
+        AppExit, Decision, JsonRpc, Notice, Notification, PermissionRequest, SessionCommandParams,
         SessionOpenParams, SessionPermitParams, StopReason, ToolCall, ToolResult, TurnDelta,
         TurnEnd,
     };
@@ -1089,5 +1127,70 @@ mod tests {
                 "unreadable message from sadld: expected value".into()
             )]
         );
+    }
+
+    fn notice(session_id: &str, message: &str, duration_ms: Option<u64>) -> Event {
+        Event::Notice(Notice {
+            session_id: session_id.into(),
+            message: message.into(),
+            variant: NoticeVariant::Success,
+            duration_ms,
+        })
+    }
+
+    #[test]
+    fn a_notice_is_shown_outside_the_transcript() {
+        let mut app = opened();
+        notify(&mut app, notice("s_1", "recalled 2 memories", Some(3000)));
+
+        let shown = app.notice.as_ref().expect("a notice");
+        assert_eq!(shown.message, "recalled 2 memories");
+        assert_eq!(shown.variant, NoticeVariant::Success);
+        assert!(blocks(&app).is_empty());
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn a_notice_for_another_session_is_ignored() {
+        let mut app = opened();
+        notify(&mut app, notice("s_2", "elsewhere", None));
+
+        assert_eq!(app.notice, None);
+    }
+
+    #[test]
+    fn a_notice_expires_after_its_duration() {
+        let mut app = opened();
+        let before = Instant::now();
+        notify(&mut app, notice("s_1", "hi", Some(3000)));
+        let after = Instant::now();
+
+        app.expire_notice(before + Duration::from_millis(2900));
+        assert!(app.notice.is_some());
+
+        app.expire_notice(after + Duration::from_millis(3000));
+        assert_eq!(app.notice, None);
+        assert_eq!(app.notice_deadline(), None);
+    }
+
+    #[test]
+    fn a_notice_without_a_duration_stays_for_the_default() {
+        let mut app = opened();
+        let before = Instant::now();
+        notify(&mut app, notice("s_1", "hi", None));
+
+        let deadline = app.notice_deadline().expect("a deadline");
+        assert!(deadline >= before + DEFAULT_NOTICE_DURATION);
+    }
+
+    #[test]
+    fn a_newer_notice_replaces_the_shown_one() {
+        let mut app = opened();
+        notify(&mut app, notice("s_1", "first", Some(60_000)));
+        notify(&mut app, notice("s_1", "second", Some(10)));
+
+        assert_eq!(app.notice.as_ref().unwrap().message, "second");
+        app.expire_notice(Instant::now() + Duration::from_millis(10));
+        assert_eq!(app.notice, None);
     }
 }

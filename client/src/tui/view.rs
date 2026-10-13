@@ -1,5 +1,6 @@
-//! Drawing the app: the transcript, the prompt editor (or a permission
-//! prompt while a tool call waits for one) and a status line.
+//! Drawing the app: the transcript, the latest notice while it lasts, the
+//! prompt editor (or a permission prompt while a tool call waits for one) and
+//! a status line.
 //!
 //! The transcript is virtualized: blocks are wrapped newest first and only
 //! until the visible window (plus the scroll offset) is filled, so drawing
@@ -7,11 +8,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::tui::app::App;
+use crate::protocol::NoticeVariant;
+use crate::tui::app::{App, ShownNotice};
 use crate::tui::transcript::{Block, ToolBlock};
 use crate::tui::wrap::{columns, wrap};
 
@@ -33,8 +35,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         input.lines.len().clamp(1, MAX_INPUT_ROWS)
     };
-    let [transcript, rule, prompt, status] = Layout::vertical([
+    let notice_rows = u16::from(app.notice.is_some());
+    let [transcript, notice, rule, prompt, status] = Layout::vertical([
         Constraint::Min(0),
+        Constraint::Length(notice_rows),
         Constraint::Length(1),
         Constraint::Length(input_rows as u16),
         Constraint::Length(1),
@@ -42,6 +46,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     .areas(area);
 
     draw_transcript(frame, app, transcript);
+    if let Some(shown) = &app.notice {
+        frame.render_widget(notice_line(shown, usize::from(notice.width)), notice);
+    }
     frame.render_widget(
         Paragraph::new("─".repeat(usize::from(rule.width))).dim(),
         rule,
@@ -71,6 +78,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     frame.render_widget(status_line(app, usize::from(status.width)), status);
+}
+
+/// The shown notice on one line, colored by its variant.
+fn notice_line(notice: &ShownNotice, width: usize) -> Line<'static> {
+    const PREFIX: &str = "· ";
+    let color = match notice.variant {
+        NoticeVariant::Info => Color::Cyan,
+        NoticeVariant::Success => Color::Green,
+        NoticeVariant::Warning => Color::Yellow,
+        NoticeVariant::Error => Color::Red,
+    };
+    let message = clip(&notice.message, width.saturating_sub(columns(PREFIX)));
+    Line::from(vec![Span::raw(PREFIX).dim(), Span::raw(message)]).fg(color)
 }
 
 /// Asks whether tool call `call_id` may run, naming it as its block does.
@@ -279,13 +299,14 @@ fn status_line(app: &App, width: usize) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::protocol::{
-        Event, JsonRpc, Notification, Outcome, PermissionRequest, Response, ServerMessage,
-        StopReason, ToolCall, ToolResult, TurnDelta, TurnEnd, Usage,
+        Event, JsonRpc, Notice, NoticeVariant, Notification, Outcome, PermissionRequest, Response,
+        ServerMessage, StopReason, ToolCall, ToolResult, TurnDelta, TurnEnd, Usage,
     };
     use crate::start::Start;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
     use serde_json::{Map, json};
 
     fn opened() -> App {
@@ -627,5 +648,66 @@ mod tests {
 
         assert_eq!(rows[5], "> a");
         assert_eq!(rows[6], "  b");
+    }
+
+    fn notice(variant: NoticeVariant, message: &str) -> Event {
+        Event::Notice(Notice {
+            session_id: "s_1".into(),
+            message: message.into(),
+            variant,
+            duration_ms: None,
+        })
+    }
+
+    #[test]
+    fn a_notice_shows_between_the_transcript_and_the_input() {
+        let mut app = opened();
+        notify(&mut app, delta("Hi"));
+        notify(&mut app, notice(NoticeVariant::Info, "recalled 2 memories"));
+
+        let rows = render(&mut app, 40, 8);
+
+        assert_eq!(rows[0], "Hi", "{}", screen(&rows));
+        assert_eq!(rows[4], "· recalled 2 memories", "{}", screen(&rows));
+        assert!(rows[5].starts_with('─'), "{}", screen(&rows));
+        assert_eq!(rows[6], ">");
+    }
+
+    #[test]
+    fn an_expired_notice_is_no_longer_drawn() {
+        let mut app = opened();
+        notify(&mut app, delta("Hi"));
+        notify(&mut app, notice(NoticeVariant::Info, "recalled 2 memories"));
+        app.expire_notice(app.notice_deadline().unwrap());
+
+        let rows = render(&mut app, 40, 8);
+
+        assert_eq!(rows[0], "Hi", "{}", screen(&rows));
+        assert!(!screen(&rows).contains("recalled"), "{}", screen(&rows));
+        assert!(rows[5].starts_with('─'), "{}", screen(&rows));
+    }
+
+    #[test]
+    fn a_long_notice_is_clipped_to_one_line() {
+        let mut app = opened();
+        notify(&mut app, notice(NoticeVariant::Info, &"word ".repeat(20)));
+
+        let rows = render(&mut app, 20, 8);
+
+        assert!(rows[4].ends_with('…'), "{}", screen(&rows));
+        assert!(rows[5].starts_with('─'), "{}", screen(&rows));
+    }
+
+    #[test]
+    fn a_notice_is_colored_by_its_variant() {
+        let mut app = opened();
+        notify(&mut app, notice(NoticeVariant::Error, "extraction failed"));
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let cell = &terminal.backend().buffer()[(2, 4)];
+        assert_eq!(cell.symbol(), "e");
+        assert_eq!(cell.fg, Color::Red);
     }
 }

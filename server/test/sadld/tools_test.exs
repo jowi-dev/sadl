@@ -12,14 +12,14 @@ defmodule Sadld.ToolsTest do
 
   defp call(name, args), do: %{id: "c1", name: name, args: args}
 
-  test "specs describe read, write and edit with JSON schemas" do
+  test "specs describe read, write, edit and skill with JSON schemas" do
     specs = Tools.specs()
 
-    assert Enum.map(specs, & &1.name) == ["read", "write", "edit"]
+    assert Enum.map(specs, & &1.name) == ["read", "write", "edit", "skill"]
 
     for spec <- specs do
       assert is_binary(spec.description)
-      assert %{type: "object", properties: %{path: _}, required: ["path" | _]} = spec.parameters
+      assert %{type: "object", properties: %{}, required: [_ | _]} = spec.parameters
     end
   end
 

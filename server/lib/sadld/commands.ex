@@ -28,11 +28,18 @@ defmodule Sadld.Commands do
   end
 
   @doc """
+  Returns the command directories in use: the `:sadld` `:command_dirs`
+  setting, or `default_dirs/0` when that is not set.
+  """
+  @spec dirs() :: [Path.t()]
+  def dirs, do: Application.get_env(:sadld, :command_dirs) || default_dirs()
+
+  @doc """
   Returns the template of command `name` from `dirs`, or `:error` when there
   is no such command or it cannot be read.
   """
   @spec fetch(String.t(), [Path.t()]) :: {:ok, String.t()} | :error
-  def fetch(name, dirs \\ default_dirs()) do
+  def fetch(name, dirs \\ dirs()) do
     with true <- valid_name?(name),
          path when is_binary(path) <- find(name, dirs),
          {:ok, contents} <- File.read(path) do

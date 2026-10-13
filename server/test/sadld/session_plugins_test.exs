@@ -268,4 +268,73 @@ defmodule Sadld.SessionPluginsTest do
       assert hd(Session.messages(id)) == %{role: :user, content: "1 unread", synthetic: true}
     end
   end
+
+  describe "command/4" do
+    @describetag :tmp_dir
+
+    setup %{tmp_dir: dir} do
+      path = Path.join(dir, "command/thatch/compact.md")
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "---\ndescription: Wrap up\n---\nWrap up, then $ARGUMENTS.\n")
+      %{dirs: [dir]}
+    end
+
+    test "starts a turn on the expanded template, after the command hook", %{dirs: dirs} do
+      test_pid = self()
+
+      hook = fn
+        "command.execute.before", input, %{"parts" => [part]} = output ->
+          send(test_pid, {:command_hook, input, output})
+          %{output | "parts" => [%{part | "text" => part["text"] <> " (marked)"}]}
+
+        _name, _input, output ->
+          output
+      end
+
+      respond = fn messages ->
+        send(test_pid, {:messages, messages})
+        reply("ok")
+      end
+
+      id = start_session(respond, hook: hook)
+      {:ok, turn_id} = Session.command(id, "thatch/compact", "compact", dirs: dirs)
+      assert await_turn(turn_id) == "completed"
+
+      assert_received {:command_hook, input, output}
+
+      assert input == %{
+               "command" => "thatch/compact",
+               "sessionID" => id,
+               "arguments" => "compact"
+             }
+
+      assert output == %{"parts" => [%{"type" => "text", "text" => "Wrap up, then compact."}]}
+
+      prompt = %{role: :user, content: "Wrap up, then compact. (marked)"}
+      assert_received {:messages, [^prompt]}
+      assert hd(Session.messages(id)) == prompt
+    end
+
+    test "fails on an unknown command or while a turn runs", %{dirs: dirs} do
+      test_pid = self()
+
+      respond = fn _messages ->
+        send(test_pid, {:started, self()})
+
+        receive do
+          :finish -> reply("ok")
+        end
+      end
+
+      id = start_session(respond, [])
+      assert Session.command(id, "nope", "", dirs: dirs) == {:error, :unknown_command}
+
+      {:ok, turn_id} = Session.send_message(id, "hi")
+      assert_receive {:started, provider}
+      assert Session.command(id, "thatch/compact", "", dirs: dirs) == {:error, :busy}
+
+      send(provider, :finish)
+      await_turn(turn_id)
+    end
+  end
 end

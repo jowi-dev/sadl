@@ -98,4 +98,32 @@ defmodule Sadld.SystemPromptTest do
     assert prompt =~ "Today's date: #{Date.utc_today()}"
     refute prompt =~ "Operating system: \n"
   end
+
+  describe "skills" do
+    @skill_tool %{name: "skill", description: "Load a skill.", parameters: %{}}
+    @skills [
+      %{name: "tidy", description: "Tidy up.", body: "", path: "/s/tidy/SKILL.md"},
+      %{name: "review", description: "Review code.", body: "", path: "/s/review/SKILL.md"}
+    ]
+
+    test "lists the available skills when the skill tool is offered", ctx do
+      prompt = build(ctx.project, ctx.config_dir, tools: [@skill_tool | @tools], skills: @skills)
+
+      assert prompt =~ "Skills"
+      assert prompt =~ "- tidy: Tidy up.\n- review: Review code."
+    end
+
+    test "leaves skills out without the skill tool or without skills", ctx do
+      refute build(ctx.project, ctx.config_dir, skills: @skills) =~ "- tidy:"
+      refute build(ctx.project, ctx.config_dir, tools: [@skill_tool], skills: []) =~ "Skills"
+    end
+
+    test "discovers the skills visible from the cwd by default", ctx do
+      dir = Path.join(ctx.project, ".opencode/skills/tidy")
+      File.mkdir_p!(dir)
+      File.write!(Path.join(dir, "SKILL.md"), "---\nname: tidy\ndescription: Tidy up.\n---\n")
+
+      assert build(ctx.project, ctx.config_dir, tools: [@skill_tool]) =~ "- tidy: Tidy up."
+    end
+  end
 end

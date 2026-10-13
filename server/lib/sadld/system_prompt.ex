@@ -1,8 +1,9 @@
 defmodule Sadld.SystemPrompt do
   @moduledoc """
   Builds a session's system prompt: a short built-in part naming the tools,
-  the working directory, the OS and today's date, followed by any context
-  files the user keeps for the agent.
+  the skills the `skill` tool can load (when that tool is offered), the
+  working directory, the OS and today's date, followed by any context files
+  the user keeps for the agent. Skills come from `Sadld.Skills.discover/2`.
 
   Context files are looked up in the user's sadl config directory
   (`Sadld.config_dir/0`) and then in the working directory and each of its
@@ -20,6 +21,8 @@ defmodule Sadld.SystemPrompt do
   Options, mostly for tests:
 
     * `:tools` - tool specs to describe (default `Sadld.Tools.specs/0`)
+    * `:skills` - skills to list when `:tools` includes `skill` (default
+      `Sadld.Skills.discover/2` of `cwd`)
     * `:os` - OS name (default the host's, such as `"linux"`)
     * `:date` - today's date (default `Date.utc_today/0`)
     * `:config_dir` - directory of the user-global context file (default
@@ -41,7 +44,7 @@ defmodule Sadld.SystemPrompt do
     Tools:
     #{Enum.map_join(tools, "\n", &"- #{&1.name}: #{&1.description}")}
 
-    Working directory: #{cwd}
+    #{skills_section(cwd, tools, opts)}Working directory: #{cwd}
     Operating system: #{os}
     Today's date: #{Date.to_iso8601(date)}
     """
@@ -49,6 +52,27 @@ defmodule Sadld.SystemPrompt do
     case context_files([config_dir | ancestors(cwd)]) do
       [] -> base
       files -> base <> "\n# Project context\n" <> Enum.map_join(files, &section/1)
+    end
+  end
+
+  # The skills are worth listing only when the model can load them.
+  defp skills_section(cwd, tools, opts) do
+    skills =
+      if Enum.any?(tools, &(&1.name == "skill")),
+        do: Keyword.get_lazy(opts, :skills, fn -> Sadld.Skills.discover(cwd) end),
+        else: []
+
+    case skills do
+      [] ->
+        ""
+
+      skills ->
+        """
+        Skills (call the skill tool with a skill's name to load its instructions \
+        before starting a task it covers):
+        #{Enum.map_join(skills, "\n", &"- #{&1.name}: #{&1.description}")}
+
+        """
     end
   end
 

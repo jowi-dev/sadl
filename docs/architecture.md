@@ -78,6 +78,9 @@ in one long-lived server.
 - Skills (`SKILL.md` files in opencode's layout, including the ones thatch
   installs) are listed in the system prompt and loaded with a built-in
   `skill` tool (ADR-0005).
+- A session can run work in child sessions that inherit its setup: the
+  model through the `task` tool, a plugin through `session.create`. Children
+  are hidden from clients (ADR-0005).
 
 ### Protocol
 

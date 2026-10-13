@@ -47,6 +47,8 @@ pub enum Call {
     SessionPermit(SessionPermitParams),
     #[serde(rename = "session.compact")]
     SessionCompact(SessionIdParams),
+    #[serde(rename = "session.command")]
+    SessionCommand(SessionCommandParams),
     #[serde(rename = "session.list")]
     SessionList(SessionListParams),
 }
@@ -96,6 +98,15 @@ pub enum Decision {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListParams {}
 
+/// Params of `session.command`: run slash command `command` (its name
+/// without the leading `/`) with the `arguments` typed after it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCommandParams {
+    pub id: String,
+    pub command: String,
+    pub arguments: String,
+}
+
 /// A server → client response to the request with the same `id`. `T` is the
 /// result type of that request's method.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,7 +150,7 @@ pub struct SessionInfo {
     pub updated_at: String,
 }
 
-/// Result of `session.send` and `session.compact`.
+/// Result of `session.send`, `session.compact` and `session.command`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSendResult {
     pub turn_id: String,
@@ -182,6 +193,8 @@ pub enum Event {
     TurnCompacted(TurnCompacted),
     #[serde(rename = "error")]
     Error(SessionError),
+    #[serde(rename = "app.exit")]
+    AppExit(AppExit),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +269,13 @@ pub struct SessionError {
     pub session_id: String,
     pub code: i64,
     pub message: String,
+}
+
+/// Params of `app.exit`: a plugin asked the clients showing the session to
+/// exit. The session itself keeps running on the server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppExit {
+    pub session_id: String,
 }
 
 impl Response<Value> {

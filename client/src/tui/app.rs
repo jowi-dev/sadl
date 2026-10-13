@@ -119,7 +119,7 @@ impl App {
             Call::SessionCancel(_) => Pending::Cancel,
             Call::SessionPermit(_) => Pending::Permit,
             Call::SessionCompact(_) => Pending::Compact,
-            Call::Handshake(_) | Call::SessionList(_) => Pending::Other,
+            Call::Handshake(_) | Call::SessionList(_) | Call::SessionCommand(_) => Pending::Other,
         };
         self.pending.insert(id, pending);
     }
@@ -357,7 +357,7 @@ impl App {
                 self.usage.input_tokens += end.usage.input_tokens;
                 self.usage.output_tokens += end.usage.output_tokens;
             }
-            Event::Error(_) => {}
+            Event::Error(_) | Event::AppExit(_) => {}
         }
         self.transcript.apply(event);
     }
@@ -377,6 +377,7 @@ fn event_session(event: &Event) -> &str {
         Event::TurnEnd(e) => &e.session_id,
         Event::TurnCompacted(e) => &e.session_id,
         Event::Error(e) => &e.session_id,
+        Event::AppExit(e) => &e.session_id,
     }
 }
 

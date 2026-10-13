@@ -112,6 +112,8 @@ impl Transcript {
             }
             // The app shows the prompt; the tool block already names the call.
             Event::PermissionRequest(_) => {}
+            // The app quits; there is nothing to draw.
+            Event::AppExit(_) => {}
         }
     }
 

@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "id": 6, "method": "session.command", "params": {"id": "s_01", "command": "thatch/compact", "arguments": "keep the parser notes"}}

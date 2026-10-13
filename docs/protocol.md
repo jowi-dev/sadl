@@ -74,6 +74,7 @@ A `SessionInfo` object is `{id, cwd, model, updated_at}`: all strings,
 | `session.cancel` | `{id: string}`                  | `{}`                           |
 | `session.permit` | `{id, call_id, decision}`       | `{}`                           |
 | `session.compact` | `{id: string}`                  | `{turn_id: string}`            |
+| `session.command` | `{id, command, arguments}`      | `{turn_id: string}`            |
 | `session.list`   | `{}`                            | `{sessions: [SessionInfo]}`    |
 
 - `session.open` starts a new session whose tools run in `cwd` (absolute
@@ -99,11 +100,16 @@ A `SessionInfo` object is `{id, cwd, model, updated_at}`: all strings,
   notification for it, or `-32003` while a turn is running. The turn sends
   `turn.compacted` unless there was nothing to compact, then ends with
   `turn.end`. See "Compaction" below.
+- `session.command` runs slash command `command`, named without its
+  leading `/`, with `arguments`, the text typed after the name (`""` for
+  none). The server expands the command's template into a user message and
+  starts a turn with it, answering like `session.send`. An unknown command
+  fails with `-32005`. See "Slash commands" below.
 
 ## Notifications
 
-Every notification below carries `session_id` and, except `error`,
-`turn_id`.
+Every notification below carries `session_id` and, except `error` and
+`app.exit`, `turn_id`.
 
 | Method               | Params                                                                   |
 |----------------------|--------------------------------------------------------------------------|
@@ -114,6 +120,7 @@ Every notification below carries `session_id` and, except `error`,
 | `turn.end`           | `{session_id, turn_id, stop_reason: string, usage: Usage}`               |
 | `turn.compacted`     | `{session_id, turn_id, summary: string}`                                 |
 | `error`              | `{session_id, code: int, message: string}`                               |
+| `app.exit`           | `{session_id}`                                                           |
 
 - `turn.delta` is the next chunk of assistant text. Concatenating a turn's
   deltas yields its full text.
@@ -141,6 +148,24 @@ Every notification below carries `session_id` and, except `error`,
 - `error` reports a failure that has no request to answer, such as a
   provider failure mid-turn. A turn that fails sends `error` and then
   `turn.end` with `stop_reason: "error"`.
+- `app.exit` asks the clients showing the session to exit, because a plugin
+  asked opencode's TUI to (`docs/sidecar.md`). The session keeps running on
+  the server and can be resumed.
+
+## Slash commands
+
+Commands are markdown files in opencode's format, so commands installed for
+opencode work unchanged. Command `name` is `<name>.md` under `command/` or
+`commands/` in `$XDG_CONFIG_HOME/opencode/` or `$XDG_CONFIG_HOME/sadl/`,
+sadl's replacing opencode's of the same name; subdirectories give names
+with slashes, such as `thatch/compact`. YAML front matter between `---`
+lines is ignored. In the rest, `$ARGUMENTS` becomes the arguments and
+`$1`, `$2`, ... their whitespace-separated words, the highest-numbered
+placeholder taking the remaining words. A template with no placeholder gets
+non-blank arguments appended after a blank line.
+
+Before the turn starts, plugins see the command through their
+`command.execute.before` hook and may rewrite the prompt.
 
 ## Compaction
 
@@ -163,6 +188,7 @@ is sent to the model changes. See ADR-0003.
 | `-32002` | Session not found               |                         |
 | `-32003` | Session busy (turn in progress) |                         |
 | `-32004` | No pending permission request   |                         |
+| `-32005` | Command not found               |                         |
 | `-32010` | Provider error                  |                         |
 
 ## Fixtures

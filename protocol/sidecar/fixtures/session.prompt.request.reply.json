@@ -1,0 +1,1 @@
+{"jsonrpc": "2.0", "id": 8, "method": "session.prompt", "params": {"path": {"id": "s_2"}, "body": {"parts": [{"type": "text", "text": "Extract the facts from these tool calls."}]}}}

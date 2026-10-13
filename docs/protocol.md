@@ -90,7 +90,8 @@ A `SessionInfo` object is `{id, cwd, model, updated_at}`: all strings,
   turn then ends with `turn.end` and `stop_reason: "cancelled"`. Cancelling
   a session with no running turn succeeds and does nothing.
 - `session.list` returns every persisted session, most recently updated
-  first.
+  first, except child sessions: those a session or plugin starts under
+  another (`docs/sidecar.md`, ADR-0005) are internal and left out.
 - `session.permit` answers the `permission.request` for tool call `call_id`
   in session `id`. `decision` is `"allow"` (the tool runs) or `"deny"` (it
   fails without running). Answering a call that is not waiting, including

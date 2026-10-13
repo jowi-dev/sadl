@@ -54,13 +54,25 @@ defmodule Sadld.Session do
   they add follows it as user messages of its own), and each tool result
   before the model reads it. They hear `session.created` when a new session
   starts, `session.status` busy and idle around each turn, `session.idle`
-  after it and `session.error` when it fails.
+  after it, `session.error` when it fails and `session.deleted` when
+  `delete/1` removes it.
+
+  A top-level session also offers the model `Sadld.Subagent`'s `task` tool,
+  after its own tools, which runs a prompt in a child session.
+
+  A child session, started by `create_child/1`, runs under a parent: it
+  inherits the parent's cwd, model, provider, tools, permission policy,
+  system prompt and plugins, and is stored with the parent's id. Children
+  are left out of `list/0`, and a child's tool call that its policy would
+  ask about is denied instead, since no client watches a child. `prompt/3`
+  runs a turn and waits for its reply, which is how a parent, or a plugin,
+  puts a child to work.
   """
 
   use GenServer, restart: :transient
 
   alias Sadld.Protocol.Notification
-  alias Sadld.{Commands, Compaction, Permissions, Plugin, SessionEvents, Store}
+  alias Sadld.{Commands, Compaction, Permissions, Plugin, SessionEvents, Store, Subagent}
 
   @registry Sadld.SessionRegistry
   @supervisor Sadld.SessionSupervisor
@@ -93,11 +105,19 @@ defmodule Sadld.Session do
     * `:compaction` - options for `Sadld.Compaction`, over its app config
     * `:plugins` - the session's `Sadld.Plugin`s (default
       `Sadld.Plugins.for_cwd/1` of `:cwd`)
+    * `:parent_id` - the parent of a child session; see `create_child/1`
   """
   @spec start(keyword()) :: {:ok, id()} | {:error, term()}
   def start(opts) do
     id = new_id()
-    session = %{id: id, cwd: Keyword.fetch!(opts, :cwd), model: Keyword.fetch!(opts, :model)}
+
+    session = %{
+      id: id,
+      cwd: Keyword.fetch!(opts, :cwd),
+      model: Keyword.fetch!(opts, :model),
+      parent_id: opts[:parent_id]
+    }
+
     {:ok, info} = Store.create_session(session)
 
     case start_child(Keyword.merge(opts, id: id, created: info)) do
@@ -117,7 +137,9 @@ defmodule Sadld.Session do
   @spec resume(id(), keyword()) :: {:ok, Store.session_info()} | {:error, :not_found | term()}
   def resume(id, opts) do
     with {:ok, info} <- Store.fetch_session(id) do
-      case start_child(Keyword.merge(opts, id: id, cwd: info.cwd, model: info.model)) do
+      stored = [id: id, cwd: info.cwd, model: info.model, parent_id: info.parent_id]
+
+      case start_child(Keyword.merge(opts, stored)) do
         {:ok, _pid} -> {:ok, info}
         {:error, {:already_started, _pid}} -> {:ok, info}
         {:error, reason} -> {:error, reason}
@@ -125,9 +147,45 @@ defmodule Sadld.Session do
     end
   end
 
-  @doc "Returns every stored session, most recently updated first."
+  @doc """
+  Starts a child session of the running session `parent_id`, set up as the
+  parent is (see the module docs), and returns its id. Its plugins hear
+  `session.created` with the parent's id as `parentID`.
+  """
+  @spec create_child(id()) :: {:ok, id()} | {:error, :not_found | term()}
+  def create_child(parent_id) do
+    with {:ok, opts} <- call(parent_id, :child_opts),
+         do: start(Keyword.put(opts, :parent_id, parent_id))
+  end
+
+  @doc """
+  Deletes session `id` and its children, stopping any that run: a running
+  turn is killed, and the plugins of each running session hear
+  `session.deleted`. Fails with `:not_found` for a session not stored.
+  """
+  @spec delete(id()) :: :ok | {:error, :not_found}
+  def delete(id) do
+    sessions = Store.list_sessions()
+
+    if Enum.any?(sessions, &(&1.id == id)) do
+      # Children first, so none outlives its parent.
+      for child <- Enum.reverse(tree(id, sessions)), do: call(child, :delete)
+      {:ok, _deleted} = Store.delete_session(id)
+      :ok
+    else
+      {:error, :not_found}
+    end
+  end
+
+  # `id` and its descendants in `sessions`, each after its parent.
+  defp tree(id, sessions) do
+    children = for %{id: child, parent_id: ^id} <- sessions, do: child
+    [id | Enum.flat_map(children, &tree(&1, sessions))]
+  end
+
+  @doc "Returns every stored session but the children, most recently updated first."
   @spec list() :: [Store.session_info()]
-  def list, do: Store.list_sessions()
+  def list, do: for(%{parent_id: nil} = info <- Store.list_sessions(), do: info)
 
   defp start_child(opts), do: DynamicSupervisor.start_child(@supervisor, {__MODULE__, opts})
 
@@ -158,6 +216,30 @@ defmodule Sadld.Session do
   @spec send_message(id(), String.t(), keyword()) ::
           {:ok, String.t() | nil} | {:error, :busy | :not_found}
   def send_message(id, text, opts \\ []), do: call(id, {:send_message, text, opts})
+
+  @typedoc "A turn's final reply: its text and the seq (position) of its message."
+  @type reply :: %{seq: non_neg_integer(), text: String.t()}
+
+  @doc """
+  Starts a turn with `text`, as `send_message/3` does, and waits for it to
+  end. Answers with the turn's final reply, or fails with `:cancelled`, or
+  `{:failed, message}` when the turn fails or the session stops.
+
+  Fails with `:busy` at once while another turn runs, rather than wait for
+  it. So a plugin hook that prompts the session whose turn is waiting on
+  the hook gets an error back instead of a deadlock.
+
+  Takes the `:synthetic` option of `send_message/3`.
+  """
+  @spec prompt(id(), String.t(), keyword()) ::
+          {:ok, reply()}
+          | {:error, :busy | :not_found | :cancelled | {:failed, String.t()}}
+  def prompt(id, text, opts \\ []) do
+    GenServer.call(via(id), {:prompt, text, opts}, :infinity)
+  catch
+    :exit, {:noproc, _call} -> {:error, :not_found}
+    :exit, {reason, _call} -> {:error, {:failed, "session stopped: #{inspect(reason)}"}}
+  end
 
   @doc """
   Stops the running turn, which then ends with `stop_reason` `"cancelled"`.
@@ -273,6 +355,7 @@ defmodule Sadld.Session do
       compaction: Store.latest_compaction(id),
       context_tokens: nil,
       updated_at: now(),
+      parent_id: opts[:parent_id],
       turn: nil
     }
 
@@ -285,10 +368,7 @@ defmodule Sadld.Session do
 
   @impl true
   def handle_call({:send_message, text, opts}, _from, state) do
-    message =
-      if opts[:synthetic],
-        do: %{role: :user, content: text, synthetic: true},
-        else: %{role: :user, content: text}
+    message = user_message(text, opts)
 
     cond do
       opts[:no_reply] ->
@@ -313,6 +393,43 @@ defmodule Sadld.Session do
     turn_id = new_id()
     job = {:command, name, arguments, text}
     {:reply, {:ok, turn_id}, state, {:continue, {:start_turn, turn_id, job}}}
+  end
+
+  def handle_call({:prompt, _text, _opts}, _from, %{turn: turn} = state) when turn != nil do
+    {:reply, {:error, :busy}, state}
+  end
+
+  # Answered when the turn ends; see end_turn/2.
+  def handle_call({:prompt, text, opts}, from, state) do
+    message = user_message(text, opts)
+    state = append_messages(state, [message])
+    {:noreply, state, {:continue, {:start_turn, new_id(), {:chat, message}, from}}}
+  end
+
+  def handle_call(:child_opts, _from, state) do
+    {_provider, provider_opts} = state.provider
+
+    opts = [
+      cwd: state.cwd,
+      model: state.model,
+      provider: state.provider,
+      tools: state.tools,
+      permissions: state.permissions,
+      system_prompt: provider_opts[:system],
+      compaction: state.compaction_opts,
+      plugins: state.plugins
+    ]
+
+    {:reply, {:ok, opts}, state}
+  end
+
+  # Stops without ending the turn as a cancel would: a deleted session goes
+  # neither idle nor busy.
+  def handle_call(:delete, _from, state) do
+    if state.turn, do: Task.shutdown(state.turn.task, :brutal_kill)
+    info = Map.take(state, [:id, :cwd, :parent_id, :updated_at])
+    Plugin.event(state.plugins, "session.deleted", %{"info" => Plugin.session(info)})
+    {:stop, :normal, :ok, %{state | turn: nil}}
   end
 
   def handle_call(:compact, _from, %{turn: turn} = state) when turn != nil do
@@ -355,13 +472,17 @@ defmodule Sadld.Session do
   end
 
   @impl true
-  def handle_continue({:start_turn, turn_id, job}, state) do
+  def handle_continue({:start_turn, turn_id, job}, state),
+    do: handle_continue({:start_turn, turn_id, job, nil}, state)
+
+  # `waiter` is a `prompt/3` caller to answer when the turn ends, or nil.
+  def handle_continue({:start_turn, turn_id, job, waiter}, state) do
     session = self()
     ctx = Map.take(state, [:messages, :compaction, :context_tokens])
 
     env =
       state
-      |> Map.take([:id, :cwd, :model, :provider, :tools, :permissions, :plugins])
+      |> Map.take([:id, :cwd, :model, :provider, :tools, :permissions, :plugins, :parent_id])
       |> Map.merge(%{compaction: state.compaction_opts, turn_id: turn_id})
 
     status(state, "busy")
@@ -382,7 +503,7 @@ defmodule Sadld.Session do
         end
       end)
 
-    turn = %{id: turn_id, task: task, usage: @zero_usage, asks: MapSet.new()}
+    turn = %{id: turn_id, task: task, usage: @zero_usage, asks: MapSet.new(), waiter: waiter}
     {:noreply, %{state | turn: turn}}
   end
 
@@ -433,6 +554,27 @@ defmodule Sadld.Session do
     %{state | compaction: compaction, context_tokens: nil, turn: turn}
   end
 
+  defp user_message(text, opts) do
+    if opts[:synthetic],
+      do: %{role: :user, content: text, synthetic: true},
+      else: %{role: :user, content: text}
+  end
+
+  # What a `prompt/3` caller gets when its turn ends: the last assistant
+  # message, which a completed turn has just appended.
+  defp prompt_result(state, "completed", _error) do
+    {message, seq} =
+      state.messages
+      |> Enum.with_index()
+      |> Enum.reverse()
+      |> Enum.find(fn {message, _seq} -> message.role == :assistant end)
+
+    {:ok, %{seq: seq, text: message.content}}
+  end
+
+  defp prompt_result(_state, "cancelled", _error), do: {:error, :cancelled}
+  defp prompt_result(_state, _stop_reason, error), do: {:error, {:failed, error}}
+
   defp append_messages(state, messages) do
     :ok = Store.append_messages(state.id, messages)
     %{state | messages: state.messages ++ messages, updated_at: now()}
@@ -449,11 +591,12 @@ defmodule Sadld.Session do
       "error" => %{"name" => "UnknownError", "data" => %{"message" => message}}
     })
 
-    end_turn(state, "error")
+    end_turn(state, "error", message)
   end
 
-  defp end_turn(%{turn: turn} = state, stop_reason) do
+  defp end_turn(%{turn: turn} = state, stop_reason, error \\ nil) do
     notify(state, "turn.end", %{turn_id: turn.id, stop_reason: stop_reason, usage: turn.usage})
+    if turn.waiter, do: GenServer.reply(turn.waiter, prompt_result(state, stop_reason, error))
     status(state, "idle")
     Plugin.event(state.plugins, "session.idle", %{"sessionID" => state.id})
     %{state | turn: nil}
@@ -504,19 +647,18 @@ defmodule Sadld.Session do
   end
 
   # A chat turn, run inside the turn task. `report` sends an event to the
-  # session. It offers the plugins' tools after the session's own and adds
-  # the user messages plugins append to the prompt, then runs the steps.
+  # session. It offers the `task` tool (to a top-level session) and the
+  # plugins' tools after the session's own, adds the user messages plugins
+  # append to the prompt, then runs the steps.
   # Returns `:completed` or `{:error, reason}`.
   defp run_turn(ctx, prompt, %{provider: {_provider, provider_opts}} = env, report) do
-    builtin = Keyword.get(provider_opts, :tools, [])
+    own = Keyword.get(provider_opts, :tools, [])
+    builtin = if env.parent_id, do: own, else: own ++ [Subagent.spec()]
     plugin_tools = Plugin.tools(env.plugins, Enum.map(builtin, & &1.name))
+    tools = builtin ++ Enum.map(plugin_tools, &elem(&1, 0))
 
     env = Map.put(env, :plugin_tools, Map.new(plugin_tools, fn {spec, p} -> {spec.name, p} end))
-
-    env =
-      if plugin_tools == [],
-        do: env,
-        else: put_provider_opt(env, :tools, builtin ++ Enum.map(plugin_tools, &elem(&1, 0)))
+    env = if tools == own, do: env, else: put_provider_opt(env, :tools, tools)
 
     case chat_message(prompt, env) do
       [] ->
@@ -673,6 +815,9 @@ defmodule Sadld.Session do
     %{role: :tool, call_id: call.id, content: output, is_error: is_error}
   end
 
+  defp execute(%{name: "task"} = call, %{parent_id: nil} = context),
+    do: Subagent.run(call.args, context.id)
+
   defp execute(call, %{tools: {tools, tools_opts}} = context) do
     case Map.fetch(context.plugin_tools, call.name) do
       {:ok, {plugin, ref}} ->
@@ -709,13 +854,18 @@ defmodule Sadld.Session do
 
   # Asking reports the call to the session, which broadcasts the request
   # and forwards the first client's answer here.
-  defp permission(%{id: call_id} = call, %{permissions: permissions, report: report}) do
+  defp permission(%{id: call_id} = call, %{permissions: permissions, report: report} = env) do
+    parent_id = env.parent_id
+
     case Permissions.check(permissions, call) do
       :allow ->
         :allow
 
       :deny ->
         {:deny, "policy"}
+
+      :ask when parent_id != nil ->
+        {:deny, "policy: a child session has no client to ask"}
 
       :ask ->
         report.({:ask, call_id})

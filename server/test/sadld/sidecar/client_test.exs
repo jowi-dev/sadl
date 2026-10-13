@@ -4,7 +4,7 @@ defmodule Sadld.Sidecar.ClientTest do
   import ExUnit.CaptureLog
 
   alias Sadld.Protocol.Notification
-  alias Sadld.{Session, SessionEvents}
+  alias Sadld.{Session, SessionEvents, Store}
   alias Sadld.Sidecar.Client
   alias Sadld.Test.{StubProvider, StubTools}
 
@@ -134,6 +134,49 @@ defmodule Sadld.Sidecar.ClientTest do
     assert Session.messages(id) == [%{role: :user, content: "a\n\nb", synthetic: true}]
   end
 
+  test "session.prompt without noReply waits for the turn and answers with its reply",
+       %{tmp_dir: dir} do
+    id = start_session(dir, fn _ -> {:ok, %{text: "done", tool_calls: [], usage: @usage}} end)
+    params = Map.put(path(id), "body", %{"parts" => [text("go")]})
+
+    assert Client.handle("session.prompt", params, dir) ==
+             {:ok,
+              %{
+                "info" => %{"id" => id <> "_1", "sessionID" => id, "role" => "assistant"},
+                "parts" => [text("done")]
+              }}
+  end
+
+  test "session.prompt fails when its turn fails", %{tmp_dir: dir} do
+    id = start_session(dir, fn _ -> {:error, :boom} end)
+    params = Map.put(path(id), "body", %{"parts" => [text("go")]})
+
+    assert Client.handle("session.prompt", params, dir) == {:error, -32_603, ":boom"}
+  end
+
+  test "session.create starts a child of a running session", %{tmp_dir: dir} do
+    parent = start_session(dir)
+    params = %{"body" => %{"parentID" => parent, "title" => "thatch-extraction"}}
+
+    assert {:ok, %{"id" => child, "parentID" => ^parent, "directory" => ^dir}} =
+             Client.handle("session.create", params, dir)
+
+    assert {:ok, %{parent_id: ^parent}} = Store.fetch_session(child)
+
+    missing = %{"body" => %{"parentID" => "missing"}}
+    assert Client.handle("session.create", missing, dir) == {:error, -32_002, "session not found"}
+  end
+
+  test "session.delete removes a session", %{tmp_dir: dir} do
+    id = start_session(dir)
+
+    assert Client.handle("session.delete", path(id), dir) == {:ok, true}
+    assert Store.fetch_session(id) == {:error, :not_found}
+
+    assert Client.handle("session.delete", path(id), dir) ==
+             {:error, -32_002, "session not found"}
+  end
+
   test "session.promptAsync without noReply starts a turn", %{tmp_dir: dir} do
     id = start_session(dir)
     params = Map.put(path(id), "body", %{"parts" => [text("wake up")]})
@@ -234,8 +277,12 @@ defmodule Sadld.Sidecar.ClientTest do
   end
 
   test "other methods and malformed params are refused", %{tmp_dir: dir} do
+    assert Client.handle("session.share", path("s"), dir) == {:error, -32_601, "method not found"}
+
     assert Client.handle("session.create", %{"body" => %{}}, dir) ==
-             {:error, -32_601, "method not found"}
+             {:error, -32_602, "invalid params"}
+
+    assert Client.handle("session.delete", %{}, dir) == {:error, -32_602, "invalid params"}
 
     assert Client.handle("session.get", %{}, dir) == {:error, -32_602, "invalid params"}
   end

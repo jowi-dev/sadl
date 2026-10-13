@@ -71,10 +71,11 @@ sadld sends these events:
 
 | `type`            | `properties`                                       |
 |-------------------|----------------------------------------------------|
-| `session.created` | `{info: Session}`                                  |
+| `session.created` | `{info: Session}`, children included                 |
 | `session.status`  | `{sessionID, status: {type: "busy" \| "idle"}}`    |
 | `session.idle`    | `{sessionID}`                                      |
 | `session.error`   | `{sessionID, error: {name, data: {message}}}`      |
+| `session.deleted` | `{info: Session}`                                  |
 
 ## host → sadld
 
@@ -91,24 +92,47 @@ params. The result is the call's `data`; the host hands the plugin
 | `session.messages`     | `{path: {id}}`                         | `[{info, parts}]`      |
 | `session.prompt`       | `{path: {id}, body: {parts, noReply?}}`| `{info, parts}`        |
 | `session.promptAsync`  | `{path: {id}, body: {parts, noReply?}}`| `{}`                   |
+| `session.create`       | `{body: {parentID, title?}}`           | `Session`              |
+| `session.delete`       | `{path: {id}}`                         | `true`                 |
 | `tui.showToast`        | `{body: {message, variant, ...}}`      | `true`                 |
 | `tui.executeCommand`   | `{body: {command}}`                    | `true`                 |
 | `tui.publish`          | `{body: {type, properties}}`           | `true`                 |
 
-- `Session` is `{id, title, directory, time: {created, updated}}`, times in
-  Unix milliseconds; sadld keeps no separate creation time, so `created` is
-  `updated`. `session.list` gives the sessions working in the worktree or
-  below it, `session.status` the running ones.
+- `Session` is `{id, title, directory, time: {created, updated}}`, plus
+  `parentID` for a child session, times in Unix milliseconds. sadld keeps
+  no separate creation time, so `created` is `updated`, and keeps no title,
+  so `title` is empty. `session.list` gives the sessions working in the
+  worktree or below it, children included, and `session.status` the
+  running ones.
 - `session.messages` gives each message as `info` `{id, sessionID, role}`
   and `parts`, a list of one `{type: "text", text}` part (`synthetic: true`
   for injected text). `id` is `<session id>_<position>`. Tool results and
   assistant messages without text are left out.
 - `session.prompt` and `session.promptAsync` join the text parts, with a
   blank line between them, into one user message, `synthetic` if any part
-  is. With `noReply` it is recorded without starting a turn, even while one
-  runs. Without it a turn starts, which fails with `-32003` while one is
-  running. Neither waits for the turn: `session.prompt` answers with the
-  recorded message, whose `info` has no `id`. The session must be running.
+  is. The session must be running. With `noReply` the message is recorded
+  without starting a turn, even while one runs, and `session.prompt`
+  answers with it, its `info` having no `id`. Without `noReply` a turn
+  starts, which fails with `-32003` at once while one is running.
+  `session.promptAsync` answers as soon as the turn starts.
+  `session.prompt` waits for the turn to end and answers with its final
+  assistant message, `info` `{id, sessionID, role: "assistant"}` (the `id`
+  of `session.messages`) and a text part; a turn that fails or is
+  cancelled answers `-32603` instead.
+- Because a busy session refuses a turn at once, a hook that prompts the
+  session whose turn is waiting on that hook gets `-32003` back rather than
+  a deadlock. A hook may wait on another session's turn.
+- `session.create` starts a child of the running session `parentID`, which
+  answers `-32002` if that is not running. The child inherits the parent's
+  cwd, model, provider, tools, permission policy, system prompt and
+  plugins, and its plugins hear `session.created` before the answer. The
+  `title` is ignored. Its tool calls that the policy would ask about are
+  denied, since no client watches a child, and it is not offered the
+  `task` tool. Children are left out of the client protocol's
+  `session.list`.
+- `session.delete` deletes a session and its children, stored or running.
+  A running one's turn is killed, without `session.idle`, and its plugins
+  hear `session.deleted`. An unknown session answers `-32002`.
 - `tui.showToast` writes the message to sadld's log.
 - `tui.executeCommand` and `tui.publish` name no session: in opencode
   they act on the session its TUI shows. Here they act on the session
@@ -123,8 +147,7 @@ params. The result is the call's `data`; the host hands the plugin
   keeps running. Any other command, or any other `tui.publish` type,
   fails with `-32602`.
 
-Any other method answers `-32601`. That includes `session.create`,
-`session.delete` and the rest of `tui`.
+Any other method answers `-32601`, the rest of `tui` included.
 
 ## Error codes
 

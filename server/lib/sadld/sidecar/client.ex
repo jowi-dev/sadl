@@ -5,7 +5,7 @@ defmodule Sadld.Sidecar.Client do
 
   Each answer is computed in the caller, which `Sadld.Sidecar` runs in a
   task of its own: answering may call a session that is itself waiting on
-  the sidecar.
+  the sidecar, and `session.prompt` waits for a whole turn.
   """
 
   require Logger
@@ -16,6 +16,7 @@ defmodule Sadld.Sidecar.Client do
   @invalid_params -32_602
   @session_not_found -32_002
   @session_busy -32_003
+  @internal_error -32_603
 
   @doc """
   Answers SDK call `method` with `params`, for a plugin serving `worktree`.
@@ -95,21 +96,40 @@ defmodule Sadld.Sidecar.Client do
     texts = for %{"type" => "text", "text" => text} <- parts, is_binary(text), do: text
     text = Enum.join(texts, "\n\n")
     synthetic = Enum.any?(parts, &(&1["synthetic"] == true))
-    opts = [synthetic: synthetic, no_reply: body["noReply"] == true]
+    no_reply = body["noReply"] == true
 
-    case Session.send_message(id, text, opts) do
-      {:ok, _turn_id} when method == "session.promptAsync" ->
-        {:ok, %{}}
+    cond do
+      method == "session.promptAsync" ->
+        opts = [synthetic: synthetic, no_reply: no_reply]
+        with {:ok, _turn_id} <- record(id, text, opts), do: {:ok, %{}}
 
-      {:ok, _turn_id} ->
-        {:ok,
-         %{"info" => %{"sessionID" => id, "role" => "user"}, "parts" => [part(text, synthetic)]}}
+      no_reply ->
+        with {:ok, nil} <- record(id, text, synthetic: synthetic, no_reply: true) do
+          {:ok,
+           %{"info" => %{"sessionID" => id, "role" => "user"}, "parts" => [part(text, synthetic)]}}
+        end
 
-      {:error, :busy} ->
-        {:error, @session_busy, "session busy"}
+      true ->
+        await_reply(id, text, synthetic)
+    end
+  end
 
-      {:error, :not_found} ->
-        not_found()
+  def handle("session.create", %{"body" => %{"parentID" => parent_id}}, _worktree, _session)
+      when is_binary(parent_id) do
+    with {:ok, id} <- Session.create_child(parent_id),
+         {:ok, info} <- Store.fetch_session(id) do
+      {:ok, Plugin.session(info)}
+    else
+      {:error, :not_found} -> not_found()
+      {:error, reason} -> {:error, @internal_error, inspect(reason)}
+    end
+  end
+
+  def handle("session.delete", %{"path" => %{"id" => id}}, _worktree, _session)
+      when is_binary(id) do
+    case Session.delete(id) do
+      :ok -> {:ok, true}
+      {:error, :not_found} -> not_found()
     end
   end
 
@@ -121,6 +141,8 @@ defmodule Sadld.Sidecar.Client do
   def handle(method, _params, _worktree, _session)
       when method in [
              "session.get",
+             "session.create",
+             "session.delete",
              "session.messages",
              "session.prompt",
              "session.promptAsync",
@@ -167,6 +189,34 @@ defmodule Sadld.Sidecar.Client do
         messages
     end
   end
+
+  # Starts a turn on session `id`, or records the message with `:no_reply`.
+  defp record(id, text, opts) do
+    case Session.send_message(id, text, opts) do
+      {:ok, turn_id} -> {:ok, turn_id}
+      {:error, reason} -> prompt_error(reason)
+    end
+  end
+
+  # Runs a turn on session `id` and answers with its reply message.
+  defp await_reply(id, text, synthetic) do
+    case Session.prompt(id, text, synthetic: synthetic) do
+      {:ok, %{seq: seq, text: reply}} ->
+        {:ok,
+         %{
+           "info" => %{"id" => "#{id}_#{seq}", "sessionID" => id, "role" => "assistant"},
+           "parts" => [part(reply, false)]
+         }}
+
+      {:error, reason} ->
+        prompt_error(reason)
+    end
+  end
+
+  defp prompt_error(:busy), do: {:error, @session_busy, "session busy"}
+  defp prompt_error(:not_found), do: not_found()
+  defp prompt_error(:cancelled), do: {:error, @internal_error, "turn cancelled"}
+  defp prompt_error({:failed, message}), do: {:error, @internal_error, message}
 
   defp part(text, true), do: %{"type" => "text", "text" => text, "synthetic" => true}
   defp part(text, _synthetic), do: %{"type" => "text", "text" => text}

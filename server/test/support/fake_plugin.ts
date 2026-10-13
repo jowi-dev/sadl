@@ -7,6 +7,12 @@ export const server = async ({ client, worktree }: any) => {
   // /thatch/exit does.
   const leaving = new Set<string>();
 
+  // Like thatch's direct extraction: once a top-level session that ran
+  // tools goes idle, a child session is prompted to "extract", and deleted
+  // when it goes idle in turn.
+  const children = new Set<string>();
+  const ranTools = new Set<string>();
+
   return {
     tool: {
       echo: {
@@ -40,16 +46,41 @@ export const server = async ({ client, worktree }: any) => {
       output.parts[0].text += " Say goodbye.";
     },
 
+    "tool.execute.after": async (input: any) => {
+      if (!children.has(input.sessionID)) ranTools.add(input.sessionID);
+    },
+
     event: async ({ event }: any) => {
       if (event.type === "session.created") {
+        const info = event.properties.info;
+        if (info.parentID) {
+          children.add(info.id);
+          return;
+        }
         await client.session.prompt({
-          path: { id: event.properties.info.id },
+          path: { id: info.id },
           body: { noReply: true, parts: [{ type: "text", text: "remember me", synthetic: true }] },
         });
       } else if (event.type === "session.idle" && leaving.delete(event.properties.sessionID)) {
         await client.tui.publish({
           body: { type: "tui.command.execute", properties: { command: "app.exit" } },
         });
+      }
+
+      if (event.type === "session.status" && event.properties.status.type === "idle") {
+        const id = event.properties.sessionID;
+
+        if (children.has(id)) {
+          children.delete(id);
+          await client.session.delete({ path: { id } });
+        } else if (ranTools.delete(id)) {
+          const child = await client.session.create({ body: { parentID: id, title: "extract" } });
+          const reply = await client.session.prompt({
+            path: { id: child.data.id },
+            body: { parts: [{ type: "text", text: "extract" }] },
+          });
+          console.error(`extracted: ${reply.data.parts[0].text}`);
+        }
       }
     },
   };

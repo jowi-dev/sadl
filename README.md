@@ -93,6 +93,13 @@ unset, sessions run without plugins. See
 [ADR-0004](docs/decisions/0004-plugin-sidecar.md) and
 [`docs/sidecar.md`](docs/sidecar.md).
 
+When a turn that used tools goes idle, thatch extracts facts from it in a
+hidden child session, which inherits the session's setup. A child never
+asks for permission: a call your policy would ask about is denied. So if
+your policy defaults to `ask`, allow thatch's tools (`thatch_memory_remember`
+at least) for extraction to save anything. See
+[ADR-0005](docs/decisions/0005-child-sessions.md).
+
 ## Slash commands
 
 Typing `/name args` runs a slash command: sadld expands the markdown

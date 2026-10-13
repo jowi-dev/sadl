@@ -16,10 +16,19 @@ defmodule Sadld.StoreTest do
     info
   end
 
+  defp create_child(store, id, parent_id) do
+    {:ok, info} =
+      Store.create_session(store, %{id: id, cwd: "/home/u/proj", model: "m", parent_id: parent_id})
+
+    info
+  end
+
   test "create_session stores a session and returns its info", %{store: store} do
     info = create(store, "s_1")
 
-    assert %{id: "s_1", cwd: "/home/u/proj", model: "m", updated_at: updated_at} = info
+    assert %{id: "s_1", cwd: "/home/u/proj", model: "m", parent_id: nil, updated_at: updated_at} =
+             info
+
     assert {:ok, %DateTime{utc_offset: 0}, 0} = DateTime.from_iso8601(updated_at)
     assert Store.fetch_session(store, "s_1") == {:ok, info}
   end
@@ -100,5 +109,51 @@ defmodule Sadld.StoreTest do
 
     assert Store.messages(store, "s_1") == messages
     assert Store.latest_compaction(store, "s_1") == %{summary: "said hi", first_kept: 2}
+  end
+
+  test "a child session records its parent", %{store: store} do
+    create(store, "s_1")
+    child = create_child(store, "s_2", "s_1")
+
+    assert %{id: "s_2", parent_id: "s_1"} = child
+    assert Store.fetch_session(store, "s_2") == {:ok, child}
+    assert child in Store.list_sessions(store)
+  end
+
+  test "delete_session removes a session with its messages, compactions and children",
+       %{store: store} do
+    create(store, "s_1")
+    create_child(store, "s_2", "s_1")
+    create_child(store, "s_3", "s_2")
+    create(store, "other")
+    :ok = Store.append_messages(store, "s_1", [%{role: :user, content: "hi"}])
+    :ok = Store.append_messages(store, "s_3", [%{role: :user, content: "deep"}])
+    :ok = Store.add_compaction(store, "s_1", %{summary: "said hi", first_kept: 1})
+
+    assert {:ok, deleted} = Store.delete_session(store, "s_1")
+    assert deleted |> Enum.map(& &1.id) |> Enum.sort() == ["s_1", "s_2", "s_3"]
+
+    assert Enum.map(Store.list_sessions(store), & &1.id) == ["other"]
+    assert Store.messages(store, "s_3") == []
+    assert Store.latest_compaction(store, "s_1") == nil
+    assert Store.delete_session(store, "s_1") == {:error, :not_found}
+  end
+
+  test "a database from before child sessions gains the parent column", %{tmp_dir: tmp_dir} do
+    path = Path.join(tmp_dir, "old.db")
+    {:ok, conn} = Exqlite.Sqlite3.open(path)
+
+    :ok =
+      Exqlite.Sqlite3.execute(conn, """
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT NOT NULL, model TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      INSERT INTO sessions VALUES ('old', '/p', 'm', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+      """)
+
+    :ok = Exqlite.Sqlite3.close(conn)
+    store = start_supervised!({Store, path: path, name: nil}, id: :old_store)
+
+    assert {:ok, %{id: "old", parent_id: nil}} = Store.fetch_session(store, "old")
+    assert %{parent_id: "old"} = create_child(store, "new", "old")
   end
 end

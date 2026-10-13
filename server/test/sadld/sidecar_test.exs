@@ -3,7 +3,7 @@ defmodule Sadld.SidecarTest do
   use ExUnit.Case, async: true
 
   alias Sadld.Protocol.Notification
-  alias Sadld.{Session, SessionEvents, Sidecar}
+  alias Sadld.{Session, SessionEvents, Sidecar, Store}
   alias Sadld.Test.{StubProvider, StubTools}
 
   @moduletag :sidecar
@@ -122,6 +122,55 @@ defmodule Sadld.SidecarTest do
     assert_receive {:session_event, ^id, %Notification{method: "turn.end"}}, 5_000
     assert_receive {:session_event, ^id, %Notification{method: "app.exit"}}, 5_000
     assert %{content: "Wrap up. Say goodbye."} = Enum.at(Session.messages(id), 1)
+  end
+
+  @tag capture_log: true
+  test "a plugin runs work in a child session it creates, prompts and deletes", ctx do
+    sidecar = start_sidecar(ctx.plugin, ctx.worktree)
+    test_pid = self()
+    usage = %{input_tokens: 1, output_tokens: 1}
+    echo = fn text -> %{id: "c_" <> text, name: "echo", args: %{"text" => text}} end
+
+    # The parent echoes once, then the plugin's child echoes "fact".
+    respond = fn messages ->
+      case {List.first(messages), List.last(messages)} do
+        {_first, %{role: :tool, content: content}} ->
+          send(test_pid, {:echoed, content})
+          {:ok, %{text: "done", tool_calls: [], usage: usage}}
+
+        {%{content: "extract"}, _last} ->
+          {:ok, %{text: "", tool_calls: [echo.("fact")], usage: usage}}
+
+        _parent ->
+          {:ok, %{text: "", tool_calls: [echo.("work")], usage: usage}}
+      end
+    end
+
+    {:ok, parent} =
+      Session.start(
+        cwd: ctx.worktree,
+        model: "m",
+        provider: {StubProvider, respond: respond},
+        tools: {StubTools, []},
+        system_prompt: "s",
+        plugins: [{Sidecar, sidecar}]
+      )
+
+    assert wait_until(fn -> Session.messages(parent) != [] end)
+    assert {:ok, %{text: "done"}} = Session.prompt(parent, "go")
+    parent_messages = Session.messages(parent)
+
+    assert_receive {:echoed, "work from " <> rest}
+    assert String.starts_with?(rest, parent)
+
+    assert_receive {:echoed, "fact from " <> rest}, 5_000
+    [child, _in_worktree] = String.split(rest, " in ", parts: 2)
+    assert child != parent
+
+    # The child goes idle and the plugin deletes it; the parent is untouched.
+    assert wait_until(fn -> Store.fetch_session(child) == {:error, :not_found} end)
+    assert Session.whereis(child) == nil
+    assert Session.messages(parent) == parent_messages
   end
 
   @tag capture_log: true

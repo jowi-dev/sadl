@@ -233,6 +233,42 @@ defmodule Sadld.Sidecar.ClientTest do
     end
   end
 
+  test "tui.showToast sends a notice to each running session in the worktree",
+       %{tmp_dir: dir} do
+    root = start_session(dir)
+    inside = start_session(Path.join(dir, "sub"))
+    elsewhere = start_session(dir <> "-other")
+    body = %{"message" => "recalled 2 memories", "variant" => "success", "duration" => 3000}
+
+    assert Client.handle("tui.showToast", %{"body" => body}, dir) == {:ok, true}
+
+    for id <- [root, inside] do
+      assert_receive {:session_event, ^id,
+                      %Notification{
+                        method: "notice",
+                        params: %{
+                          session_id: ^id,
+                          message: "recalled 2 memories",
+                          variant: "success",
+                          duration_ms: 3000
+                        }
+                      }}
+    end
+
+    refute_received {:session_event, ^elsewhere, %Notification{method: "notice"}}
+  end
+
+  test "tui.showToast defaults the variant and leaves out a missing duration",
+       %{tmp_dir: dir} do
+    id = start_session(dir)
+    body = %{"message" => "watching", "variant" => "fancy"}
+
+    assert Client.handle("tui.showToast", %{"body" => body}, dir) == {:ok, true}
+
+    assert_receive {:session_event, ^id, %Notification{method: "notice", params: params}}
+    assert params == %{session_id: id, message: "watching", variant: "info"}
+  end
+
   test "other methods and malformed params are refused", %{tmp_dir: dir} do
     assert Client.handle("session.create", %{"body" => %{}}, dir) ==
              {:error, -32_601, "method not found"}

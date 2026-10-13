@@ -109,7 +109,12 @@ params. The result is the call's `data`; the host hands the plugin
   runs. Without it a turn starts, which fails with `-32003` while one is
   running. Neither waits for the turn: `session.prompt` answers with the
   recorded message, whose `info` has no `id`. The session must be running.
-- `tui.showToast` writes the message to sadld's log.
+- `tui.showToast` sends a `notice` notification (`docs/protocol.md`) to
+  every running session working in the worktree or below it, and logs the
+  message. A toast names no session, and plugins also raise them outside any
+  hook or tool call (watcher wake-ups), so it goes to the whole worktree
+  rather than to the session whose call is in flight. `duration` becomes
+  `duration_ms`; an unknown `variant` becomes `"info"`.
 - `tui.executeCommand` and `tui.publish` name no session: in opencode
   they act on the session its TUI shows. Here they act on the session
   sadld last told the host about, the latest named by an `event`, a `hook`

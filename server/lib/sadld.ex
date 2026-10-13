@@ -18,13 +18,14 @@ defmodule Sadld do
 
   @doc "The user's sadl config directory: `$XDG_CONFIG_HOME/sadl`, or `~/.config/sadl`."
   @spec config_dir() :: Path.t()
-  def config_dir do
-    config_home =
-      case System.get_env("XDG_CONFIG_HOME") do
-        home when home in [nil, ""] -> Path.join(System.user_home!(), ".config")
-        home -> home
-      end
+  def config_dir, do: Path.join(config_home(), "sadl")
 
-    Path.join(config_home, "sadl")
+  @doc "The user's XDG config home: `$XDG_CONFIG_HOME`, or `~/.config` when it is unset."
+  @spec config_home() :: Path.t()
+  def config_home do
+    case System.get_env("XDG_CONFIG_HOME") do
+      home when home in [nil, ""] -> Path.join(System.user_home!(), ".config")
+      home -> home
+    end
   end
 end

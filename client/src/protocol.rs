@@ -195,6 +195,8 @@ pub enum Event {
     Error(SessionError),
     #[serde(rename = "app.exit")]
     AppExit(AppExit),
+    #[serde(rename = "notice")]
+    Notice(Notice),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,6 +278,27 @@ pub struct SessionError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppExit {
     pub session_id: String,
+}
+
+/// A transient message for the user, such as a plugin's toast. It is not
+/// part of the transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notice {
+    pub session_id: String,
+    pub message: String,
+    pub variant: NoticeVariant,
+    /// How long to show the notice, when the sender asked for a duration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeVariant {
+    Info,
+    Success,
+    Warning,
+    Error,
 }
 
 impl Response<Value> {

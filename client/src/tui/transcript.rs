@@ -114,6 +114,8 @@ impl Transcript {
             Event::PermissionRequest(_) => {}
             // The app quits; there is nothing to draw.
             Event::AppExit(_) => {}
+            // A notice is transient; the app shows it outside the transcript.
+            Event::Notice(_) => {}
         }
     }
 

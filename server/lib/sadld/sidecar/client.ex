@@ -10,12 +10,15 @@ defmodule Sadld.Sidecar.Client do
 
   require Logger
 
-  alias Sadld.{Plugin, Session, Store}
+  alias Sadld.{Plugin, Session, SessionEvents, Store}
+  alias Sadld.Protocol.Notification
 
   @method_not_found -32_601
   @invalid_params -32_602
   @session_not_found -32_002
   @session_busy -32_003
+
+  @variants ["info", "success", "warning", "error"]
 
   @doc """
   Answers SDK call `method` with `params`, for a plugin serving `worktree`.
@@ -55,9 +58,7 @@ defmodule Sadld.Sidecar.Client do
 
   def handle("session.status", _params, worktree, _session) do
     statuses =
-      for id <- Session.running(),
-          %{cwd: cwd} <- [Session.info(id)],
-          within?(cwd, worktree),
+      for id <- running_in(worktree),
           status when is_atom(status) <- [Session.status(id)],
           into: %{},
           do: {id, %{"type" => Atom.to_string(status)}}
@@ -113,8 +114,25 @@ defmodule Sadld.Sidecar.Client do
     end
   end
 
-  def handle("tui.showToast", %{"body" => %{"message" => message}}, worktree, _session) do
+  def handle("tui.showToast", %{"body" => %{"message" => message} = body}, worktree, _session)
+      when is_binary(message) do
     Logger.info("plugin notice in #{worktree}: #{message}")
+
+    variant = if body["variant"] in @variants, do: body["variant"], else: "info"
+    params = %{message: message, variant: variant}
+
+    params =
+      if is_integer(body["duration"]),
+        do: Map.put(params, :duration_ms, body["duration"]),
+        else: params
+
+    for id <- running_in(worktree) do
+      SessionEvents.broadcast(id, %Notification{
+        method: "notice",
+        params: Map.put(params, :session_id, id)
+      })
+    end
+
     {:ok, true}
   end
 
@@ -172,6 +190,14 @@ defmodule Sadld.Sidecar.Client do
   defp part(text, _synthetic), do: %{"type" => "text", "text" => text}
 
   defp not_found, do: {:error, @session_not_found, "session not found"}
+
+  # The ids of the running sessions working in `worktree` or below it.
+  defp running_in(worktree) do
+    for id <- Session.running(),
+        %{cwd: cwd} <- [Session.info(id)],
+        within?(cwd, worktree),
+        do: id
+  end
 
   defp within?(cwd, worktree), do: cwd == worktree or String.starts_with?(cwd, worktree <> "/")
 end

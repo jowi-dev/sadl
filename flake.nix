@@ -7,7 +7,7 @@
     # The opencode plugin sadld hosts in a Bun sidecar (ADR-0004). Pinned by
     # rev: its package bundles the patched native ONNX runtime, and the
     # sidecar relies on its plugin surface staying put.
-    thatch.url = "github:jowi-dev/thatch/8e84a8bf304eb86dd74afb44a04afc4b50e9ff4a";
+    thatch.url = "github:sysread/thatch/7d193bc7c36f873100869b4b10d68e8eea4fe78a";
   };
 
   outputs = { self, nixpkgs, flake-utils, thatch }:

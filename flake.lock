@@ -18,24 +18,6 @@
         "type": "github"
       }
     },
-    "flake-utils_2": {
-      "inputs": {
-        "systems": "systems_2"
-      },
-      "locked": {
-        "lastModified": 1731533236,
-        "narHash": "sha256-l0KFg5HjrsfsO/JpG+r7fRrqm12kzFHyUHqHCVpMMbI=",
-        "owner": "numtide",
-        "repo": "flake-utils",
-        "rev": "11707dc2f618dd54ca8739b309ec4fc024de578b",
-        "type": "github"
-      },
-      "original": {
-        "owner": "numtide",
-        "repo": "flake-utils",
-        "type": "github"
-      }
-    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1791366222,
@@ -90,38 +72,22 @@
         "type": "github"
       }
     },
-    "systems_2": {
-      "locked": {
-        "lastModified": 1681028828,
-        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
-        "owner": "nix-systems",
-        "repo": "default",
-        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nix-systems",
-        "repo": "default",
-        "type": "github"
-      }
-    },
     "thatch": {
       "inputs": {
-        "flake-utils": "flake-utils_2",
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1788877274,
-        "narHash": "sha256-/auZIb00o8b9dFef/xNO/r5lOec6qWxkqKql2BLTTpk=",
-        "owner": "jowi-dev",
+        "lastModified": 1791217693,
+        "narHash": "sha256-8iuGqMi4qGyaEX7LBovFnrIjJll+aGt2lGQQ+LW5MG4=",
+        "owner": "sysread",
         "repo": "thatch",
-        "rev": "8e84a8bf304eb86dd74afb44a04afc4b50e9ff4a",
+        "rev": "7d193bc7c36f873100869b4b10d68e8eea4fe78a",
         "type": "github"
       },
       "original": {
-        "owner": "jowi-dev",
+        "owner": "sysread",
         "repo": "thatch",
-        "rev": "8e84a8bf304eb86dd74afb44a04afc4b50e9ff4a",
+        "rev": "7d193bc7c36f873100869b4b10d68e8eea4fe78a",
         "type": "github"
       }
     }
